@@ -14,8 +14,7 @@ const NMS_THRESHOLD: f32 = 0.2; // NMS 임계값을 더 낮춤
 const BBOX_COLOR: Rgb<u8> = Rgb([255, 0, 0]); // 빨간색
 
 // 임베디드 리소스 (YOLOv9-c 모델)
-static YOLOV9_C_ONNX: &[u8] = include_bytes!("../assets/models/gelan-c.onnx");
-//static YOLOV9_C_ONNX: &[u8] = include_bytes!("../assets/models/yolov9-c.onnx");
+static YOLOV9_C_ONNX: &[u8] = include_bytes!("../assets/models/gelan-e.onnx");
 
 /// 객체 검출 결과를 나타내는 구조체
 #[derive(Debug, Clone, PartialEq)]

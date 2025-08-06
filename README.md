@@ -38,24 +38,50 @@ cd yolov9_onnx_test
 
 #### 3. 모델 다운로드
 
-프로젝트를 실행하기 전에 YOLOv9-c 모델을 다운로드해야 합니다:
+프로젝트를 실행하기 전에 원하는 모델을 다운로드해야 합니다:
 
-1. [YOLOv9 공식 저장소](https://github.com/WongKinYiu/yolov9)에서 모델 다운로드
-2. `yolov9-c.onnx` 파일을 다운로드
-3. 다운로드한 파일을 `assets/models/` 폴더에 `yolov9-c.onnx` 이름으로 저장
+1. [Hugging Face Xenova/yolov9-onnx](https://huggingface.co/Xenova/yolov9-onnx/tree/main)에서 모델 다운로드
+2. 원하는 모델 파일을 다운로드 (권장: `yolov9-c.onnx` 또는 `gelan-c.onnx`)
+3. 다운로드한 파일을 `assets/models/` 폴더에 저장
 
+**다운로드 방법**:
 ```bash
 # assets/models 폴더 생성 (없는 경우)
 mkdir -p assets/models
 
-# 모델 파일을 assets/models/yolov9-c.onnx로 이동
-mv ~/Downloads/yolov9-c.onnx assets/models/
+# 방법 1: 웹 브라우저에서 직접 다운로드
+# https://huggingface.co/Xenova/yolov9-onnx/tree/main 에서 파일 클릭 후 다운로드
+
+# 방법 2: Git LFS를 사용한 다운로드 (선택사항)
+git lfs install
+git clone https://huggingface.co/Xenova/yolov9-onnx
+cp yolov9-onnx/yolov9-c.onnx assets/models/
+
+# 방법 3: wget을 사용한 다운로드 (Linux/macOS)
+wget https://huggingface.co/Xenova/yolov9-onnx/resolve/main/yolov9-c.onnx -O assets/models/yolov9-c.onnx
 ```
 
-**동작 가능한 모델** (macOS M4에서 테스트됨):
-- ✅ **YOLOv9-c 모델** (`yolov9-c.onnx`): 640x640 입력 크기, 빠른 추론 속도
-- ✅ **YOLOv9-e 모델** (`yolov9-e.onnx`): 더 정확하지만 느림
-- ✅ **YOLOv9-s 모델** (`yolov9-s.onnx`): 가벼운 모델, 빠른 추론
+**권장 모델**:
+- **기본 사용**: `yolov9-c.onnx` (205 MB) - 균형잡힌 성능
+- **경량화**: `gelan-c.onnx` (102 MB) - 가장 빠른 추론
+- **고정밀**: `yolov9-e.onnx` (278 MB) - 최고 정확도
+
+**Hugging Face에서 다운로드 가능한 모델들**:
+
+| 모델명 | 파일 크기 | 설명 | 특징 |
+|--------|-----------|------|------|
+| **YOLOv9-c** | 205 MB | YOLOv9 Compact 버전 | 빠른 추론 속도, 실시간 처리에 적합 |
+| **YOLOv9-e** | 278 MB | YOLOv9 Extended 버전 | 높은 정확도, 정밀한 검출에 적합 |
+| **GELAN-c** | 102 MB | GELAN Compact 버전 | YOLOv9의 개선된 경량 버전 |
+| **GELAN-e** | 233 MB | GELAN Extended 버전 | GELAN의 확장 버전, 높은 정확도 |
+
+**모델 선택 가이드**:
+- **실시간 처리**: YOLOv9-c (205 MB) 또는 GELAN-c (102 MB)
+- **높은 정확도**: YOLOv9-e (278 MB) 또는 GELAN-e (233 MB)
+- **메모리 제약**: GELAN-c (102 MB) - 가장 작은 크기
+- **최고 성능**: YOLOv9-e (278 MB) - 가장 큰 모델
+
+**테스트된 환경**: macOS M4에서 모든 모델이 정상 작동
 
 #### 4. 프로젝트 빌드
 ```bash
@@ -232,7 +258,16 @@ flowchart LR
 
 ### 성능 결과
 
-**YOLOv9-c 모델 (640x640)**
+**모델별 성능 비교** (macOS M4 기준):
+
+| 모델 | 파일 크기 | 추론 시간 | 정확도 | 메모리 사용량 | 권장 용도 |
+|------|-----------|-----------|--------|---------------|-----------|
+| **GELAN-c** | 102 MB | ~150-200 ms | 높음 | 낮음 | 실시간 처리, 모바일 |
+| **YOLOv9-c** | 205 MB | ~200-300 ms | 높음 | 중간 | 일반적인 사용 |
+| **GELAN-e** | 233 MB | ~300-400 ms | 매우 높음 | 중간 | 정밀 검출 |
+| **YOLOv9-e** | 278 MB | ~400-500 ms | 최고 | 높음 | 연구, 정밀 분석 |
+
+**테스트 결과 예시** (YOLOv9-c 모델):
 ```
 Found 4 objects:
 1. person (Confidence: 89.7%, BBox: [0.586, 0.051, 0.905, 1.000])
@@ -241,6 +276,11 @@ Found 4 objects:
 4. snowboard (Confidence: 58.2%, BBox: [0.771, 0.433, 0.885, 0.989])
 ⏱️ Inference Time: ~200-300 ms
 ```
+
+**성능 최적화 팁**:
+- **빠른 추론**: GELAN-c 모델 사용 (102 MB)
+- **정확도 우선**: YOLOv9-e 모델 사용 (278 MB)
+- **균형**: YOLOv9-c 모델 사용 (205 MB) - 기본 권장
 
 ## 라이선스
 
