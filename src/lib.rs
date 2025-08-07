@@ -16,6 +16,38 @@ const BBOX_COLOR: Rgb<u8> = Rgb([255, 0, 0]); // 빨간색
 // 임베디드 리소스 (YOLOv9-c 모델)
 static YOLOV9_C_ONNX: &[u8] = include_bytes!("../assets/models/gelan-e.onnx");
 
+
+/// 모델 파일 이름을 파싱하여 모델 정보를 반환하는 함수
+pub fn get_model_info() -> (String, u32) {
+    // 파일 경로에서 모델 이름 추출
+    let model_path = "../assets/models/gelan-e.onnx";
+    let file_name = std::path::Path::new(model_path)
+        .file_name()
+        .and_then(|name| name.to_str())
+        .unwrap_or("unknown.onnx");
+    
+    // 파일 이름에서 모델 타입 추출
+    let model_name = if file_name.contains("gelan-e") {
+        "YOLOv9-GELAN-E"
+    } else if file_name.contains("gelan-c") {
+        "YOLOv9-GELAN-C"
+    } else if file_name.contains("gelan-n") {
+        "YOLOv9-GELAN-N"
+    } else if file_name.contains("gelan-s") {
+        "YOLOv9-GELAN-S"
+    } else if file_name.contains("gelan-m") {
+        "YOLOv9-GELAN-M"
+    } else if file_name.contains("gelan-l") {
+        "YOLOv9-GELAN-L"
+    } else if file_name.contains("gelan-x") {
+        "YOLOv9-GELAN-X"
+    } else {
+        "YOLOv9-Unknown"
+    };
+    
+    (model_name.to_string(), MODEL_INPUT_SIZE)
+}
+
 /// 객체 검출 결과를 나타내는 구조체
 #[derive(Debug, Clone, PartialEq)]
 pub struct Detection {

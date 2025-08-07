@@ -1,7 +1,7 @@
 use eframe::egui;
-use yolov9_onnx_test_lib::{detect_objects_with_settings, Detection, ModelCache};
 use std::fs;
 use std::path::PathBuf;
+use yolov9_onnx_test_lib::{Detection, ModelCache, detect_objects_with_settings, get_model_info};
 
 /// GUI 애플리케이션 실행
 pub fn run_gui() {
@@ -82,14 +82,22 @@ impl YoloV9App {
         // 모델 정보 표시
         ui.horizontal(|ui| {
             ui.label("Model:");
+            let (model_name, input_size) = get_model_info();
             ui.colored_label(
                 egui::Color32::from_rgb(0, 150, 255),
-                "YOLOv9-c (640x640)"
+                format!("{} ({}x{})", model_name, input_size, input_size),
             );
         });
 
         ui.vertical(|ui| {
-            if ui.add_sized(egui::vec2(380.0, 40.0), egui::Button::new("📁 Select Image")).clicked() && !self.is_processing {
+            if ui
+                .add_sized(
+                    egui::vec2(380.0, 40.0),
+                    egui::Button::new("📁 Select Image"),
+                )
+                .clicked()
+                && !self.is_processing
+            {
                 self.select_image(ui.ctx());
             }
 
@@ -98,7 +106,8 @@ impl YoloV9App {
             }
 
             if let Some(path) = &self.selected_image_path {
-                let file_name = path.file_name()
+                let file_name = path
+                    .file_name()
                     .map(|f| f.to_string_lossy())
                     .unwrap_or_else(|| "<unknown>".into());
                 ui.label(format!("Selected: {}", file_name));
@@ -111,7 +120,7 @@ impl YoloV9App {
                 ui.label("⏱️ Inference Time:");
                 ui.colored_label(
                     egui::Color32::from_rgb(0, 150, 255),
-                    format!("{:.2} ms", inference_time)
+                    format!("{:.2} ms", inference_time),
                 );
             });
         }
@@ -122,23 +131,32 @@ impl YoloV9App {
         ui.add_space(10.0);
         ui.collapsing("⚙️ Settings", |ui| {
             ui.add_space(5.0);
-            
+
             // 신뢰도 임계값 설정
             ui.label("Confidence Threshold:");
             ui.horizontal(|ui| {
                 // 슬라이더
                 let mut confidence = self.confidence_threshold;
-                if ui.add(egui::Slider::new(&mut confidence, 0.1..=1.0)
-                    .text("Confidence")
-                    .fixed_decimals(2))
-                    .changed() {
+                if ui
+                    .add(
+                        egui::Slider::new(&mut confidence, 0.1..=1.0)
+                            .text("Confidence")
+                            .fixed_decimals(2),
+                    )
+                    .changed()
+                {
                     self.confidence_threshold = confidence;
                 }
-                
+
                 // 숫자 입력 박스
                 let mut confidence_text = format!("{:.2}", self.confidence_threshold);
-                if ui.add_sized(egui::vec2(60.0, 20.0), egui::TextEdit::singleline(&mut confidence_text))
-                    .changed() {
+                if ui
+                    .add_sized(
+                        egui::vec2(60.0, 20.0),
+                        egui::TextEdit::singleline(&mut confidence_text),
+                    )
+                    .changed()
+                {
                     if let Ok(value) = confidence_text.parse::<f32>() {
                         if value >= 0.1 && value <= 1.0 {
                             self.confidence_threshold = value;
@@ -146,25 +164,34 @@ impl YoloV9App {
                     }
                 }
             });
-            
+
             ui.add_space(5.0);
-            
+
             // NMS 임계값 설정
             ui.label("NMS Threshold:");
             ui.horizontal(|ui| {
                 // 슬라이더
                 let mut nms = self.nms_threshold;
-                if ui.add(egui::Slider::new(&mut nms, 0.05..=0.8)
-                    .text("NMS")
-                    .fixed_decimals(2))
-                    .changed() {
+                if ui
+                    .add(
+                        egui::Slider::new(&mut nms, 0.05..=0.8)
+                            .text("NMS")
+                            .fixed_decimals(2),
+                    )
+                    .changed()
+                {
                     self.nms_threshold = nms;
                 }
-                
+
                 // 숫자 입력 박스
                 let mut nms_text = format!("{:.2}", self.nms_threshold);
-                if ui.add_sized(egui::vec2(60.0, 20.0), egui::TextEdit::singleline(&mut nms_text))
-                    .changed() {
+                if ui
+                    .add_sized(
+                        egui::vec2(60.0, 20.0),
+                        egui::TextEdit::singleline(&mut nms_text),
+                    )
+                    .changed()
+                {
                     if let Ok(value) = nms_text.parse::<f32>() {
                         if value >= 0.05 && value <= 0.8 {
                             self.nms_threshold = value;
@@ -172,23 +199,32 @@ impl YoloV9App {
                     }
                 }
             });
-            
+
             ui.add_space(5.0);
-            
+
             // 현재 설정값 표시
             ui.horizontal(|ui| {
                 ui.label("Current Settings:");
                 ui.colored_label(
                     egui::Color32::from_rgb(100, 200, 100),
-                    format!("Conf: {:.2}, NMS: {:.2}", self.confidence_threshold, self.nms_threshold)
+                    format!(
+                        "Conf: {:.2}, NMS: {:.2}",
+                        self.confidence_threshold, self.nms_threshold
+                    ),
                 );
             });
-            
+
             ui.add_space(5.0);
-            
+
             // 재처리 버튼
-            if ui.add_sized(egui::vec2(380.0, 30.0), egui::Button::new("🔄 Reprocess with New Settings"))
-                .clicked() && !self.is_processing {
+            if ui
+                .add_sized(
+                    egui::vec2(380.0, 30.0),
+                    egui::Button::new("🔄 Reprocess with New Settings"),
+                )
+                .clicked()
+                && !self.is_processing
+            {
                 if let Some(path) = &self.selected_image_path {
                     self.process_image(ui.ctx(), path.clone());
                 }
@@ -208,7 +244,7 @@ impl YoloV9App {
     fn render_detections_panel(&self, ui: &mut egui::Ui) {
         ui.heading(format!("Detections ({})", self.detections.len()));
         let available_height = ui.available_height();
-        
+
         // 스크롤 가능한 영역 생성
         egui::ScrollArea::vertical()
             .id_salt("scroll_area_detections")
@@ -233,7 +269,10 @@ impl YoloV9App {
     fn render_detection_item(&self, ui: &mut egui::Ui, index: usize, detection: &Detection) {
         ui.group(|ui| {
             ui.heading(format!("Detection #{}", index + 1));
-            ui.label(format!("Class: {} (ID: {})", detection.class_name, detection.class_id));
+            ui.label(format!(
+                "Class: {} (ID: {})",
+                detection.class_name, detection.class_id
+            ));
             ui.label(format!("Confidence: {:.1}%", detection.confidence * 100.0));
             ui.label(format!(
                 "BBox: [{:.3}, {:.3}, {:.3}, {:.3}]",
@@ -301,7 +340,8 @@ impl YoloV9App {
                             println!("Model cache initialized");
                         }
                         Err(e) => {
-                            self.error_message = Some(format!("Failed to initialize model cache: {}", e));
+                            self.error_message =
+                                Some(format!("Failed to initialize model cache: {}", e));
                             return;
                         }
                     }
@@ -309,7 +349,12 @@ impl YoloV9App {
 
                 // 객체 검출 실행 (설정된 임계값 사용)
                 if let Some(cache) = &mut self.model_cache {
-                    match detect_objects_with_settings(&image_data, cache, self.confidence_threshold, self.nms_threshold) {
+                    match detect_objects_with_settings(
+                        &image_data,
+                        cache,
+                        self.confidence_threshold,
+                        self.nms_threshold,
+                    ) {
                         Ok(result) => {
                             self.detections = result.detections;
                             self.inference_time_ms = Some(result.inference_time_ms);
