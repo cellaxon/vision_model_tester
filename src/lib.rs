@@ -5,9 +5,10 @@ use ndarray::CowArray;
 use ndarray::{ArrayD, IxDyn};
 use ort::execution_providers::CPUExecutionProviderOptions;
 use ort::{Environment, ExecutionProvider, SessionBuilder, Value};
-use serde::{Deserialize, Serialize};
-use std::path::Path;
 use std::sync::Arc;
+use serde::{Deserialize, Serialize};
+use rusqlite::{Connection, params};
+use sha2::{Sha256, Digest};
 
 // 상수 정의
 const MODEL_INPUT_SIZE: u32 = 640; // YOLOv9-c는 640x640 입력 사용
@@ -40,7 +41,7 @@ pub fn get_model_info(selected_file_name: &str) -> (String, u32) {
 }
 
 /// 객체 검출 결과를 나타내는 구조체
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct Detection {
     pub bbox: [f32; 4], // [x1, y1, x2, y2] in normalized coordinates (0-1)
     pub confidence: f32,
@@ -168,8 +169,11 @@ fn non_maximum_suppression(detections: &mut Vec<Detection>, nms_threshold: f32) 
         return;
     }
     
-    // 신뢰도 기준으로 정렬 (높은 신뢰도가 먼저)
-    detections.sort_by(|a, b| b.confidence.partial_cmp(&a.confidence).unwrap());
+    // 신뢰도 기준으로 정렬 (높은 신뢰도가 먼저) - 패닉 방지
+    detections.sort_by(|a, b| {
+        b.confidence.partial_cmp(&a.confidence)
+            .unwrap_or(std::cmp::Ordering::Equal)
+    });
     
     let mut keep = Vec::new();
     let mut suppressed = vec![false; detections.len()];
@@ -199,7 +203,9 @@ fn non_maximum_suppression(detections: &mut Vec<Detection>, nms_threshold: f32) 
     // 유지할 검출 결과만 남기기
     let mut new_detections = Vec::new();
     for &idx in &keep {
-        new_detections.push(detections[idx].clone());
+        if idx < detections.len() {
+            new_detections.push(detections[idx].clone());
+        }
     }
     
     *detections = new_detections;
@@ -251,7 +257,7 @@ fn post_process_detections(detections: &mut Vec<Detection>) {
         }
     }
     
-    // 중복 제거 (인덱스 순서대로 제거)
+    // 중복 제거 (인덱스 순서대로 제거) - 패닉 방지
     to_remove.sort();
     to_remove.reverse();
     for &idx in &to_remove {
@@ -410,6 +416,11 @@ pub fn parse_yolov9_outputs(
     
     for box_idx in 0..num_boxes {
         // 바운딩 박스 좌표 (center_x, center_y, width, height) - 픽셀 좌표로 출력됨
+        // 배열 경계 검사 추가
+        if box_idx >= boxes.shape()[1] {
+            continue;
+        }
+        
         let cx = boxes[[0, box_idx]];
         let cy = boxes[[1, box_idx]];
         let w = boxes[[2, box_idx]];
@@ -436,6 +447,11 @@ pub fn parse_yolov9_outputs(
         let mut best_class = 0;
         
         for class_idx in 0..num_classes {
+            // 배열 경계 검사 추가
+            if class_idx >= scores.shape()[0] || box_idx >= scores.shape()[1] {
+                continue;
+            }
+            
             let raw_score = scores[[class_idx, box_idx]];
             // 점수 스케일링 (매우 작은 값들을 확대)
             let scaled_score = raw_score * 1000.0; // 스케일링 팩터
@@ -523,6 +539,11 @@ pub fn parse_yolov9_outputs_pre_nms(
     let scores = output_data.slice(ndarray::s![0, 4.., ..]);
 
     for box_idx in 0..num_boxes {
+        // 배열 경계 검사 추가
+        if box_idx >= boxes.shape()[1] {
+            continue;
+        }
+        
         let cx = boxes[[0, box_idx]];
         let cy = boxes[[1, box_idx]];
         let w = boxes[[2, box_idx]];
@@ -543,6 +564,11 @@ pub fn parse_yolov9_outputs_pre_nms(
         let mut max_conf = 0.0;
         let mut best_class = 0;
         for class_idx in 0..num_classes {
+            // 배열 경계 검사 추가
+            if class_idx >= scores.shape()[0] || box_idx >= scores.shape()[1] {
+                continue;
+            }
+            
             let raw_score = scores[[class_idx, box_idx]];
             let scaled_score = raw_score * 1000.0;
             let conf = sigmoid(scaled_score);
@@ -608,10 +634,17 @@ pub fn run_inference_get_output(
     cache: &mut ModelCache,
     model_file_name: &str,
 ) -> anyhow::Result<(ArrayD<f32>, f64, RgbImage)> {
-    let img = ImageReader::new(std::io::Cursor::new(image_data))
+    // 이미지 데이터가 비어있는지 확인
+    if image_data.is_empty() {
+        return Err(anyhow::anyhow!("Empty image data"));
+    }
+    
+    let img = match ImageReader::new(std::io::Cursor::new(image_data))
         .with_guessed_format()?
-        .decode()?
-        .to_rgb8();
+        .decode() {
+            Ok(img) => img.to_rgb8(),
+            Err(e) => return Err(anyhow::anyhow!("Failed to decode image: {}", e)),
+        };
 
     let session = cache.get_session(model_file_name)?;
     let input_array = preprocess_image(&img)?;
@@ -632,46 +665,62 @@ pub fn run_inference_get_output(
     }
 }
 
-/// JSON 캐시에 저장할 출력 텐서 데이터 구조
-#[derive(Serialize, Deserialize)]
-pub struct InferenceCacheJson {
-    pub model_file_name: String,
-    pub model_name: String,
-    pub output_shape: Vec<usize>,
-    pub output_data: Vec<f32>,
-}
-
-/// 출력 텐서를 이미지 경로와 동일한 이름의 JSON으로 저장
-pub fn save_output_tensor_json(
-    image_path: &Path,
+/// 출력 텐서에서 pre-NMS 검출 결과를 추출하고 DB에 저장
+pub fn process_and_save_pre_nms(
+    output_tensor: &ndarray::ArrayViewD<f32>,
+    image_path: &str,
+    image_data: &[u8],
     model_file_name: &str,
-    output: &ArrayD<f32>,
-) -> anyhow::Result<()> {
-    let (model_name, _input) = get_model_info(model_file_name);
-    let json = InferenceCacheJson {
-        model_file_name: model_file_name.to_string(),
-        model_name,
-        output_shape: output.shape().to_vec(),
-        output_data: output.iter().copied().collect(),
-    };
-    let json_path = image_path.with_extension("json");
-    let text = serde_json::to_string_pretty(&json)?;
-    std::fs::write(json_path, text)?;
-    Ok(())
+    db: &InferenceDb,
+) -> anyhow::Result<Vec<Detection>> {
+    // 이미지 크기 추출 (텍스처 크기에서 추정)
+    let img = match ImageReader::new(std::io::Cursor::new(image_data))
+        .with_guessed_format()?
+        .decode() {
+            Ok(img) => img.to_rgb8(),
+            Err(e) => return Err(anyhow::anyhow!("Failed to decode image: {}", e)),
+        };
+    
+    let pre_nms_detections = parse_yolov9_outputs_pre_nms(
+        output_tensor,
+        img.width(),
+        img.height(),
+    )?;
+    
+    // DB에 저장
+    db.save_pre_nms_detections(image_path, image_data, model_file_name, &pre_nms_detections)?;
+    
+    Ok(pre_nms_detections)
 }
 
-/// 이미지 경로와 동일한 이름의 JSON에서 출력 텐서를 로드
-/// 반환: Some((model_file_name, ArrayD)) 또는 None (파일 없음/형식 오류)
-pub fn load_output_tensor_json(image_path: &Path) -> anyhow::Result<Option<(String, ArrayD<f32>)>> {
-    let json_path = image_path.with_extension("json");
-    if !json_path.exists() {
-        return Ok(None);
+/// DB에서 pre-NMS 검출 결과를 로드하거나, 없으면 추론 실행
+pub fn load_or_infer_pre_nms(
+    image_path: &str,
+    image_data: &[u8],
+    model_file_name: &str,
+    cache: &mut ModelCache,
+    db: &InferenceDb,
+) -> anyhow::Result<(Vec<Detection>, f64)> {
+    // 먼저 DB에서 로드 시도
+    if let Some(cached_detections) = db.load_pre_nms_detections(image_path, model_file_name)? {
+        println!("📁 Loaded pre-NMS detections from DB cache");
+        return Ok((cached_detections, 0.0)); // 캐시 사용 시 추론 시간 0
     }
-    let text = std::fs::read_to_string(&json_path)?;
-    let parsed: InferenceCacheJson = serde_json::from_str(&text)?;
-    // ArrayD 재구성
-    let array = ArrayD::from_shape_vec(IxDyn(&parsed.output_shape), parsed.output_data)?;
-    Ok(Some((parsed.model_file_name, array)))
+    
+    // DB에 없으면 추론 실행
+    println!("🔄 Running inference (not found in DB cache)");
+    let (output_array, inference_time_ms, _) = run_inference_get_output(image_data, cache, model_file_name)?;
+    let view = output_array.view();
+    
+    let pre_nms_detections = process_and_save_pre_nms(
+        &view,
+        image_path,
+        image_data,
+        model_file_name,
+        db,
+    )?;
+    
+    Ok((pre_nms_detections, inference_time_ms))
 }
 
 /// 레터박싱 좌표를 원본 이미지 좌표로 변환
@@ -828,6 +877,208 @@ impl ModelCache {
     /// 임베디드 모델 바이트 로드
     fn load_embedded_model_bytes(&self, file_name: &str) -> anyhow::Result<&'static [u8]> {
         get_embedded_model_bytes(file_name)
+    }
+}
+
+/// SQLite DB 관리 구조체
+pub struct InferenceDb {
+    conn: Connection,
+}
+
+impl InferenceDb {
+    /// DB 초기화 및 테이블 생성
+    pub fn new() -> anyhow::Result<Self> {
+        // 홈 디렉토리 경로 생성
+        let home_dir = match std::env::var("HOME") {
+            Ok(path) => path,
+            Err(_) => match std::env::var("USERPROFILE") {
+                Ok(path) => path,
+                Err(_) => match std::env::current_dir() {
+                    Ok(dir) => dir.to_string_lossy().to_string(),
+                    Err(_) => return Err(anyhow::anyhow!("Failed to determine home directory")),
+                },
+            },
+        };
+        
+        // DB 디렉토리 경로 생성
+        let db_dir = std::path::Path::new(&home_dir).join("cellaxon").join("yolov9_onnx_test");
+        
+        // 디렉토리가 없으면 생성
+        if !db_dir.exists() {
+            if let Err(e) = std::fs::create_dir_all(&db_dir) {
+                return Err(anyhow::anyhow!("Failed to create directory {:?}: {}", db_dir, e));
+            }
+        }
+        
+        let db_path = db_dir.join("inference_cache.db");
+        let conn = match Connection::open(&db_path) {
+            Ok(conn) => conn,
+            Err(e) => return Err(anyhow::anyhow!("Failed to open database at {:?}: {}", db_path, e)),
+        };
+        
+        // 테이블 생성
+        if let Err(e) = conn.execute(
+            "CREATE TABLE IF NOT EXISTS inference_cache (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                image_path TEXT NOT NULL,
+                image_hash TEXT NOT NULL,
+                model_file_name TEXT NOT NULL,
+                model_name TEXT NOT NULL,
+                image_width INTEGER NOT NULL,
+                image_height INTEGER NOT NULL,
+                detections_json TEXT NOT NULL,
+                created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+                UNIQUE(image_path, model_file_name)
+            )",
+            [],
+        ) {
+            return Err(anyhow::anyhow!("Failed to create table: {}", e));
+        }
+        
+        // 인덱스 생성 (성능 향상)
+        if let Err(e) = conn.execute(
+            "CREATE INDEX IF NOT EXISTS idx_image_hash ON inference_cache(image_hash)",
+            [],
+        ) {
+            return Err(anyhow::anyhow!("Failed to create image_hash index: {}", e));
+        }
+        
+        if let Err(e) = conn.execute(
+            "CREATE INDEX IF NOT EXISTS idx_model_file ON inference_cache(model_file_name)",
+            [],
+        ) {
+            return Err(anyhow::anyhow!("Failed to create model_file index: {}", e));
+        }
+        
+        Ok(Self { conn })
+    }
+    
+    /// 이미지 해시 계산
+    pub fn calculate_image_hash(image_data: &[u8]) -> String {
+        let mut hasher = Sha256::new();
+        hasher.update(image_data);
+        format!("{:x}", hasher.finalize())
+    }
+    
+    /// pre-NMS 검출 결과를 DB에 저장
+    pub fn save_pre_nms_detections(
+        &self,
+        image_path: &str,
+        image_data: &[u8],
+        model_file_name: &str,
+        detections: &[Detection],
+    ) -> anyhow::Result<()> {
+        let image_hash = Self::calculate_image_hash(image_data);
+        let (model_name, _) = get_model_info(model_file_name);
+        
+        // 이미지 크기 추출 (첫 번째 검출에서 추정)
+        let (width, height) = if let Some(_first_det) = detections.first() {
+            // bbox는 정규화된 좌표이므로, 실제 픽셀 크기는 추정 불가
+            // 대신 기본값 사용 (나중에 실제 이미지 크기로 업데이트)
+            (640, 480)
+        } else {
+            (640, 480)
+        };
+        
+        let detections_json = serde_json::to_string(detections)?;
+        
+        self.conn.execute(
+            "INSERT OR REPLACE INTO inference_cache 
+             (image_path, image_hash, model_file_name, model_name, image_width, image_height, detections_json)
+             VALUES (?, ?, ?, ?, ?, ?, ?)",
+            params![
+                image_path,
+                image_hash,
+                model_file_name,
+                model_name,
+                width,
+                height,
+                detections_json
+            ],
+        )?;
+        
+        Ok(())
+    }
+    
+    /// DB에서 pre-NMS 검출 결과 로드
+    pub fn load_pre_nms_detections(
+        &self,
+        image_path: &str,
+        model_file_name: &str,
+    ) -> anyhow::Result<Option<Vec<Detection>>> {
+        let mut stmt = self.conn.prepare(
+            "SELECT detections_json FROM inference_cache 
+             WHERE image_path = ? AND model_file_name = ?"
+        )?;
+        
+        let mut rows = stmt.query(params![image_path, model_file_name])?;
+        
+        if let Some(row) = rows.next()? {
+            let detections_json: String = row.get(0)?;
+            let detections: Vec<Detection> = serde_json::from_str(&detections_json)?;
+            Ok(Some(detections))
+        } else {
+            Ok(None)
+        }
+    }
+    
+    /// 이미지 해시로 검출 결과 검색 (파일 경로가 바뀌었을 때)
+    pub fn load_by_image_hash(
+        &self,
+        image_hash: &str,
+        model_file_name: &str,
+    ) -> anyhow::Result<Option<(String, Vec<Detection>)>> {
+        let mut stmt = self.conn.prepare(
+            "SELECT image_path, detections_json FROM inference_cache 
+             WHERE image_hash = ? AND model_file_name = ?"
+        )?;
+        
+        let mut rows = stmt.query(params![image_hash, model_file_name])?;
+        
+        if let Some(row) = rows.next()? {
+            let image_path: String = row.get(0)?;
+            let detections_json: String = row.get(1)?;
+            let detections: Vec<Detection> = serde_json::from_str(&detections_json)?;
+            Ok(Some((image_path, detections)))
+        } else {
+            Ok(None)
+        }
+    }
+    
+    /// 캐시 정리 (오래된 항목 삭제)
+    pub fn cleanup_old_cache(&self, days_old: i32) -> anyhow::Result<usize> {
+        let deleted = self.conn.execute(
+            "DELETE FROM inference_cache 
+             WHERE created_at < datetime('now', '-{} days')",
+            params![days_old],
+        )?;
+        Ok(deleted)
+    }
+    
+    /// 캐시 통계
+    pub fn get_cache_stats(&self) -> anyhow::Result<(usize, usize)> {
+        let total_count: usize = self.conn.query_row(
+            "SELECT COUNT(*) FROM inference_cache",
+            [],
+            |row| row.get(0),
+        )?;
+        
+        let unique_images: usize = self.conn.query_row(
+            "SELECT COUNT(DISTINCT image_hash) FROM inference_cache",
+            [],
+            |row| row.get(0),
+        )?;
+        
+        Ok((total_count, unique_images))
+    }
+    
+    /// 특정 이미지와 모델의 캐시 항목 삭제
+    pub fn delete_cache_entry(&self, image_path: &str, model_file_name: &str) -> anyhow::Result<usize> {
+        let deleted = self.conn.execute(
+            "DELETE FROM inference_cache WHERE image_path = ? AND model_file_name = ?",
+            params![image_path, model_file_name],
+        )?;
+        Ok(deleted)
     }
 }
 

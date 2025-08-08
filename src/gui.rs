@@ -2,11 +2,15 @@ use eframe::egui;
 use std::fs;
 use std::path::PathBuf;
 use yolov9_onnx_test_lib::{
-    apply_nms_only, get_embedded_model_list, get_model_info, load_output_tensor_json,
-    run_inference_get_output, save_output_tensor_json, Detection, ModelCache,
-    parse_yolov9_outputs_pre_nms,
+    apply_nms_only, get_embedded_model_list, get_model_info, Detection, ModelCache,
+    InferenceDb, load_or_infer_pre_nms,
 };
-use ndarray::ArrayD;
+
+// 줌 제어 상수
+const MOUSE_WHEEL_ZOOM_DELTA: f32 = 0.02; // 마우스 휠 줌 변화량 (로그 공간)
+const KEYBOARD_ZOOM_DELTA: f32 = 0.05;    // 키보드 줌 변화량 (로그 공간)
+const MIN_ZOOM_LOG: f32 = -2.3;           // 최소 줌 로그값 (ln(0.1))
+const MAX_ZOOM_LOG: f32 = 3.0;            // 최대 줌 로그값 (ln(20.0))
 
 /// GUI 애플리케이션 실행
 pub fn run_gui() {
@@ -35,6 +39,7 @@ struct YoloV9App {
     image_size: egui::Vec2,
     inference_time_ms: Option<f64>,
     model_cache: Option<ModelCache>,
+    inference_db: Option<InferenceDb>,
     // 설정값들
     confidence_threshold: f32,
     nms_threshold: f32,
@@ -62,6 +67,7 @@ impl Default for YoloV9App {
             image_size: egui::Vec2::ZERO,
             inference_time_ms: None,
             model_cache: None,
+            inference_db: None,
             // 기본 설정값들
             confidence_threshold: 0.6,
             nms_threshold: 0.2,
@@ -85,6 +91,9 @@ enum DetectionSortBy {
 
 impl eframe::App for YoloV9App {
     fn update(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
+        // 키보드 단축키 처리 (줌 컨트롤)
+        self.handle_keyboard_shortcuts(ctx);
+
         // 좌측 사이드 패널 (검출 결과 및 설정)
         egui::SidePanel::left("detections_panel")
             .resizable(false)
@@ -105,6 +114,39 @@ impl eframe::App for YoloV9App {
 }
 
 impl YoloV9App {
+    /// 키보드 단축키 처리
+    fn handle_keyboard_shortcuts(&mut self, ctx: &egui::Context) {
+        ctx.input(|input| {
+            // Ctrl + Plus/Minus: 줌 인/아웃 (더 세밀한 제어)
+            if input.key_pressed(egui::Key::Plus) && input.modifiers.ctrl {
+                let current_log_zoom = self.image_zoom.ln();
+                let new_log_zoom = (current_log_zoom + KEYBOARD_ZOOM_DELTA).clamp(MIN_ZOOM_LOG, MAX_ZOOM_LOG);
+                self.image_zoom = new_log_zoom.exp();
+            }
+            
+            if input.key_pressed(egui::Key::Minus) && input.modifiers.ctrl {
+                let current_log_zoom = self.image_zoom.ln();
+                let new_log_zoom = (current_log_zoom - KEYBOARD_ZOOM_DELTA).clamp(MIN_ZOOM_LOG, MAX_ZOOM_LOG);
+                self.image_zoom = new_log_zoom.exp();
+            }
+            
+            // 숫자 키 0: 줌 리셋 (100%)
+            if input.key_pressed(egui::Key::Num0) {
+                self.image_zoom = 1.0;
+            }
+            
+            // 숫자 키 1: 50% 줌
+            if input.key_pressed(egui::Key::Num1) {
+                self.image_zoom = 0.5;
+            }
+            
+            // 숫자 키 2: 200% 줌
+            if input.key_pressed(egui::Key::Num2) {
+                self.image_zoom = 2.0;
+            }
+        });
+    }
+
     /// 헤더 영역 렌더링
     fn render_header(&mut self, ui: &mut egui::Ui) {
         ui.heading("YOLOv9 Object Detection");
@@ -273,46 +315,77 @@ impl YoloV9App {
 
             ui.add_space(5.0);
 
-            // 화면 배율 설정
+            // 화면 배율 설정 (자연로그 기반)
             ui.separator();
-            ui.label("Image Zoom:");
+            ui.label("Image Zoom (Natural Log):");
             ui.horizontal(|ui| {
-                let mut zoom = self.image_zoom;
+                // 자연로그 공간에서 슬라이더 작동
+                let log_zoom = self.image_zoom.ln();
+                let mut log_zoom_value = log_zoom;
                 if ui
                     .add(
-                        egui::Slider::new(&mut zoom, 0.25..=6.0)
-                            .text("Zoom")
-                            .logarithmic(true),
+                        egui::Slider::new(&mut log_zoom_value, MIN_ZOOM_LOG..=MAX_ZOOM_LOG)
+                            .text("Log Zoom")
+                            .fixed_decimals(2),
                     )
                     .changed()
                 {
-                    self.image_zoom = (zoom * 100.0).round() / 100.0;
+                    // 로그 공간에서 선형 공간으로 변환
+                    self.image_zoom = log_zoom_value.exp();
                 }
 
-                let mut zoom_text = format!("{:.2}x", self.image_zoom);
+                // 현재 줌 레벨 표시 (더 정확한 소수점)
+                let mut zoom_text = format!("{:.3}x", self.image_zoom);
                 if ui
                     .add_sized(
-                        egui::vec2(70.0, 20.0),
+                        egui::vec2(80.0, 20.0),
                         egui::TextEdit::singleline(&mut zoom_text),
                     )
                     .changed()
                 {
                     let cleaned = zoom_text.trim_end_matches('x');
                     if let Ok(v) = cleaned.parse::<f32>() {
-                        if (0.05..=20.0).contains(&v) {
+                        if (0.1..=20.0).contains(&v) {
                             self.image_zoom = v;
                         }
                     }
                 }
 
-                if ui.button("100% ").clicked() {
+                // 줌 컨트롤 버튼들
+                if ui.button("100%").clicked() {
                     self.image_zoom = 1.0;
                 }
-                if ui.button("Fit").clicked() {
-                    // 가능한 경우 중앙패널 높이에 맞춰 대략 맞춤
-                    // 정확한 fit은 이미지 표시 위치에서 계산됨
-                    self.image_zoom = 1.0; // 일단 1.0으로 리셋
+                if ui.button("50%").clicked() {
+                    self.image_zoom = 0.5;
                 }
+                if ui.button("200%").clicked() {
+                    self.image_zoom = 2.0;
+                }
+                if ui.button("Fit").clicked() {
+                    // 이미지가 화면에 맞도록 자동 조정
+                    self.image_zoom = 1.0;
+                }
+            });
+
+            // 현재 줌 정보 표시
+            ui.horizontal(|ui| {
+                ui.label("Zoom Info:");
+                ui.colored_label(
+                    egui::Color32::from_rgb(150, 150, 255),
+                    format!("Current: {:.3}x (log: {:.3})", self.image_zoom, self.image_zoom.ln()),
+                );
+            });
+
+            // 키보드 단축키 도움말
+            ui.add_space(5.0);
+            ui.collapsing("⌨️ Keyboard Shortcuts", |ui| {
+                ui.label("Zoom Controls:");
+                ui.label("• Ctrl + Plus: Zoom In");
+                ui.label("• Ctrl + Minus: Zoom Out");
+                ui.label("• 0: Reset to 100%");
+                ui.label("• 1: 50% Zoom");
+                ui.label("• 2: 200% Zoom");
+                ui.label("• Mouse Wheel: Fine zoom control");
             });
 
             ui.add_space(5.0);
@@ -321,7 +394,7 @@ impl YoloV9App {
             if ui
                 .add_sized(
                     egui::vec2(380.0, 30.0),
-                    egui::Button::new("🔄 Force Re-infer (ignore JSON cache)"),
+                    egui::Button::new("🔄 Force Re-infer (ignore DB cache)"),
                 )
                 .clicked()
                 && !self.is_processing
@@ -574,15 +647,31 @@ impl YoloV9App {
             .id_salt("scroll_area_image")
             .max_height(available_height)
             .show(ui, |ui| {
-                // 우측(이미지 영역) 전체에서 휠 입력을 줌으로 처리
+                // 우측(이미지 영역) 전체에서 휠 입력을 줌으로 처리 (자연로그 기반)
                 let pointer_in_area = ui
                     .input(|i| i.pointer.hover_pos())
                     .map_or(false, |pos| ui.clip_rect().contains(pos));
                 if pointer_in_area {
                     let scroll_delta = ui.input(|i| i.smooth_scroll_delta).y;
                     if scroll_delta != 0.0 {
-                        let zoom_factor = if scroll_delta > 0.0 { 1.1 } else { 1.0 / 1.1 };
-                        self.image_zoom = (self.image_zoom * zoom_factor).clamp(0.1, 20.0);
+                        // 자연로그 기반 줌: 더 세밀한 제어
+                        // 현재 줌 값을 자연로그 공간으로 변환
+                        let current_log_zoom = self.image_zoom.ln();
+                        
+                        // 스크롤 델타에 따른 로그 공간에서의 변화량 (매우 세밀한 제어)
+                        let log_delta = if scroll_delta > 0.0 {
+                            // 확대: 매우 작은 증가량
+                            MOUSE_WHEEL_ZOOM_DELTA
+                        } else {
+                            // 축소: 매우 작은 감소량
+                            -MOUSE_WHEEL_ZOOM_DELTA
+                        };
+                        
+                        // 새로운 로그 줌 값 계산
+                        let new_log_zoom = (current_log_zoom + log_delta).clamp(MIN_ZOOM_LOG, MAX_ZOOM_LOG);
+                        
+                        // 로그 공간에서 다시 선형 공간으로 변환
+                        self.image_zoom = new_log_zoom.exp();
                     }
                 }
 
@@ -688,93 +777,106 @@ impl YoloV9App {
         self.error_message = None;
         self.processed_image = None;
         self.detections.clear();
+        self.pre_nms_detections.clear();
         self.inference_time_ms = None;
 
         // 이미지 파일 읽기
-        match fs::read(&path) {
-            Ok(image_data) => {
-                // 모델 캐시 초기화 (필요한 경우)
-                if self.model_cache.is_none() {
-                    match ModelCache::new() {
-                        Ok(cache) => {
-                            self.model_cache = Some(cache);
-                            println!("Model cache initialized");
-                        }
-                        Err(e) => {
-                            self.error_message =
-                                Some(format!("Failed to initialize model cache: {}", e));
-                            return;
-                        }
-                    }
+        let image_data = match fs::read(&path) {
+            Ok(data) => {
+                if data.is_empty() {
+                    self.error_message = Some("Empty image file".to_string());
+                    self.is_processing = false;
+                    return;
                 }
-
-                // 추론 결과 JSON 캐시 확인
-                let mut used_cache = false;
-                let mut output_array_opt: Option<ArrayD<f32>> = None;
-                if let Ok(Some((model_in_json, array))) = load_output_tensor_json(&path) {
-                    if model_in_json == self.selected_model {
-                        used_cache = true;
-                        output_array_opt = Some(array);
-                        // 캐시 사용 시 추론 시간 표시는 생략
-                        self.inference_time_ms = None;
-                        // 텍스처는 원본 이미지에서 생성
-                        if let Ok(img) = image::load_from_memory(&image_data) {
-                            self.load_texture(ctx, img.to_rgb8());
-                        }
-                    }
-                }
-
-                if let Some(cache) = &mut self.model_cache {
-                    if !used_cache {
-                        // 추론 실행 1회
-                        match run_inference_get_output(&image_data, cache, &self.selected_model) {
-                            Ok((output_array, infer_ms, result_img)) => {
-                                self.inference_time_ms = Some(infer_ms);
-                                // JSON 저장
-                                if let Err(e) = save_output_tensor_json(&path, &self.selected_model, &output_array) {
-                                    eprintln!("Failed to save JSON cache: {}", e);
-                                }
-                                output_array_opt = Some(output_array);
-                                self.load_texture(ctx, result_img);
-                            }
-                            Err(e) => {
-                                self.error_message = Some(format!("Detection error: {}", e));
-                            }
-                        }
-                    }
-                }
-
-                // 출력 텐서 -> pre-NMS 파싱 -> NMS 적용 -> 선택 갱신
-                if let Some(output_array) = output_array_opt {
-                    let view = output_array.view();
-                    // 이미지 크기는 로드된 텍스처의 크기 사용
-                    let w = self.image_size.x.max(1.0) as u32;
-                    let h = self.image_size.y.max(1.0) as u32;
-                    match parse_yolov9_outputs_pre_nms(&view, w, h) {
-                        Ok(pre) => {
-                            self.pre_nms_detections = pre;
-                            self.detections = apply_nms_only(self.pre_nms_detections.clone(), self.nms_threshold);
-                            self.selection = vec![true; self.detections.len()];
-                            self.update_selection_by_confidence();
-                        }
-                        Err(e) => {
-                            self.error_message = Some(format!("Parsing error: {}", e));
-                        }
-                    }
-                }
+                data
             }
             Err(e) => {
                 self.error_message = Some(format!("Failed to read file: {}", e));
+                self.is_processing = false;
+                return;
+            }
+        };
+
+        // 모델 캐시 초기화 (필요한 경우)
+        if self.model_cache.is_none() {
+            match ModelCache::new() {
+                Ok(cache) => {
+                    self.model_cache = Some(cache);
+                    println!("Model cache initialized");
+                }
+                Err(e) => {
+                    self.error_message = Some(format!("Failed to initialize model cache: {}", e));
+                    self.is_processing = false;
+                    return;
+                }
+            }
+        }
+
+        // SQLite DB 초기화 (필요한 경우)
+        if self.inference_db.is_none() {
+            match InferenceDb::new() {
+                Ok(db) => {
+                    self.inference_db = Some(db);
+                    println!("Inference DB initialized");
+                }
+                Err(e) => {
+                    self.error_message = Some(format!("Failed to initialize inference DB: {}", e));
+                    self.is_processing = false;
+                    return;
+                }
+            }
+        }
+
+        // 이미지 경로를 문자열로 변환
+        let image_path_str = path.to_string_lossy().to_string();
+
+        if let (Some(cache), Some(db)) = (&mut self.model_cache, &self.inference_db) {
+            match load_or_infer_pre_nms(
+                &image_path_str,
+                &image_data,
+                &self.selected_model,
+                cache,
+                db,
+            ) {
+                Ok((pre_nms_detections, inference_time_ms)) => {
+                    self.pre_nms_detections = pre_nms_detections;
+                    self.detections = apply_nms_only(
+                        self.pre_nms_detections.clone(),
+                        self.nms_threshold,
+                    );
+                    self.selection = vec![true; self.detections.len()];
+                    self.update_selection_by_confidence();
+                    
+                    if inference_time_ms > 0.0 {
+                        self.inference_time_ms = Some(inference_time_ms);
+                    } else {
+                        self.inference_time_ms = None; // 캐시 사용 시 시간 표시 안함
+                    }
+                    
+                    // 텍스처 로딩
+                    if let Ok(img) = image::load_from_memory(&image_data) {
+                        self.load_texture(ctx, img.to_rgb8());
+                    }
+                }
+                Err(e) => {
+                    self.error_message = Some(format!("Detection error: {}", e));
+                }
             }
         }
 
         self.is_processing = false;
     }
 
-    /// 강제 재추론(캐시 무시)
+    /// 강제 재추론(DB 캐시 무시)
     fn process_image_with_force(&mut self, ctx: &egui::Context, path: PathBuf) {
-        // 기존 JSON 삭제 후 일반 처리
-        let _ = std::fs::remove_file(path.with_extension("json"));
+        // DB에서 해당 항목 삭제 후 일반 처리
+        if let Some(db) = &self.inference_db {
+            let image_path_str = path.to_string_lossy().to_string();
+            if let Err(e) = db.delete_cache_entry(&image_path_str, &self.selected_model) {
+                eprintln!("Failed to delete from DB: {}", e);
+                // DB 삭제 실패해도 계속 진행 (강제 재추론이므로)
+            }
+        }
         self.process_image(ctx, path);
     }
 
@@ -783,20 +885,36 @@ impl YoloV9App {
             self.selection.clear();
             return;
         }
-        if self.selection.len() != self.detections.len() {
-            self.selection = vec![true; self.detections.len()];
+        
+        // selection 벡터 크기 조정
+        while self.selection.len() < self.detections.len() {
+            self.selection.push(true);
         }
-        for (i, det) in self.detections.iter().enumerate() {
-            self.selection[i] = det.confidence >= self.confidence_threshold;
+        if self.selection.len() > self.detections.len() {
+            self.selection.truncate(self.detections.len());
+        }
+        
+        // 신뢰도 임계값에 따라 선택 상태 업데이트
+        for (i, detection) in self.detections.iter().enumerate() {
+            if i < self.selection.len() {
+                self.selection[i] = detection.confidence >= self.confidence_threshold;
+            }
         }
     }
 
     fn reapply_nms_only(&mut self) {
         if self.pre_nms_detections.is_empty() {
+            self.detections.clear();
+            self.selection.clear();
             return;
         }
-        self.detections = apply_nms_only(self.pre_nms_detections.clone(), self.nms_threshold);
-        // NMS 변경 시에도 체크박스는 confidence 기준으로 갱신
+        
+        self.detections = apply_nms_only(
+            self.pre_nms_detections.clone(),
+            self.nms_threshold,
+        );
+        
+        // selection 벡터 크기 조정
         self.selection = vec![true; self.detections.len()];
         self.update_selection_by_confidence();
     }
