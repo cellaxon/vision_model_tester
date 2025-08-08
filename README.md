@@ -1,288 +1,306 @@
-# YOLOv9 ONNX Test
+# YOLOv9 ONNX Object Detection Application
 
-YOLOv9 (You Only Look Once v9) 객체 검출을 Rust로 구현한 프로젝트입니다. ONNX Runtime으로 추론하고, egui 기반 GUI로 시각화합니다.
+YOLOv9 모델을 사용한 객체 검출 애플리케이션입니다. ONNX Runtime을 통해 추론을 수행하며, GUI 인터페이스를 제공합니다.
 
-## 주요 기능
+## 🚀 주요 기능
 
-- **여러 모델 임베딩/선택**: `assets/models`의 모델들을 바이너리에 임베딩. 콤보박스로 모델 선택, 선택 시 1회 로딩 후 캐시 재사용
-- **ONNX 추론 + 모델 캐싱**: ONNX Runtime 사용, 모델 세션 캐시로 빠른 재추론
-- **egui 오버레이 렌더링**: 원본 이미지를 그대로 표시하고, 그 위에 bbox와 라벨을 egui로 오버레이
-- **줌/패닝**: 설정 패널 슬라이더 및 우측 이미지 영역 마우스 휠로 줌, 이미지 드래그로 스크롤 이동
-- **검출 테이블**: 체크박스로 표시 대상 선택(기본 전체 선택), 컬럼 헤더 클릭으로 정렬(ASC/DESC), Select All/None 버튼 제공
-- **이미지 전처리**: 레터박싱 기반 리사이즈 및 정규화
-- **NMS 및 후처리**: 중복 제거, 작은 박스 제거, 최대 50개로 제한
-- **추론 시간 표시/에러 처리**: 실시간 성능, 오류 메시지 표시
+### 🔍 객체 검출
+- YOLOv9 모델을 사용한 실시간 객체 검출
+- COCO 데이터셋의 80개 클래스 지원
+- 신뢰도 임계값 및 NMS 임계값 조정 가능
+- Pre-NMS 데이터 캐싱으로 빠른 재처리
+- **신뢰도 기반 바운딩 박스 색상 매핑**
 
-## 설치 및 실행
+### 🖥️ GUI 인터페이스
+- egui 기반의 현대적인 사용자 인터페이스
+- **자연로그 기반 세밀한 줌 제어**
+- 실시간 이미지 줌 및 패닝
+- 검출 결과 테이블 형태 표시
+- 정렬 및 필터링 기능
+- 키보드 단축키 지원
+- **바운딩 박스 색상 매핑 모드 선택**
 
-### 요구사항
+### 💾 캐싱 시스템
+- SQLite 데이터베이스를 사용한 추론 결과 캐싱
+- 이미지 해시 기반 중복 검출 방지
+- 설정 가능한 캐시 정리 정책
+- **Pre-NMS 데이터 저장으로 NMS 재실행 최적화**
 
-- Rust 최신 안정판(예: 1.74+ 권장)
-- Windows/macOS/Linux 지원 (테스트 환경은 다양함)
+### ⚙️ 설정 관리
+- 중앙화된 설정 시스템
+- 런타임 설정 변경 지원
+- 모듈화된 설정 구조
+- **컴파일 타임 상수 관리**
 
-### 설치
+### 🎨 바운딩 박스 색상 시스템
+- **고정 색상 모드**: 모든 박스를 빨간색으로 표시
+- **범위별 색상 모드**: 5단계 색상 (파랑→초록→노랑→주황→빨강)
+- **그라데이션 모드**: 선형 색상 전환
+- **HSV 기반 모드**: 자연스러운 색상 전환
 
-#### 1. 프로젝트 클론
-
-```bash
-git clone https://github.com/cellaxon/yolov9_onnx_test
-cd yolov9_onnx_test
-```
-
-#### 2. 모델 준비 (임베딩)
-
-`assets/models` 폴더에 다음 중 하나 이상의 모델 파일을 넣습니다. 이 폴더의 파일은 빌드 시 바이너리에 임베딩됩니다(파일 변경 시 재빌드 필요).
-
-지원 파일(예정):
-
-- `gelan-c.onnx`
-- `gelan-e.onnx`
-- `yolov9-c.onnx`
-- `yolov9-e.onnx`
-
-**다운로드 방법**:
-
-```bash
-# assets/models 폴더 생성 (없는 경우)
-mkdir -p assets/models
-
-# 방법 1: 웹 브라우저에서 직접 다운로드
-# https://huggingface.co/Xenova/yolov9-onnx/tree/main 에서 파일 클릭 후 다운로드
-
-# 방법 2: Git LFS를 사용한 다운로드 (선택사항)
-git lfs install
-git clone https://huggingface.co/Xenova/yolov9-onnx
-cp yolov9-onnx/yolov9-c.onnx assets/models/
-
-# 방법 3: wget을 사용한 다운로드 (Linux/macOS)
-wget https://huggingface.co/Xenova/yolov9-onnx/resolve/main/yolov9-c.onnx -O assets/models/yolov9-c.onnx
-```
-
-**권장 모델**:
-
-- **기본 사용**: `yolov9-c.onnx` (205 MB)
-- **경량화**: `gelan-c.onnx` (102 MB)
-- **고정밀**: `yolov9-e.onnx` (278 MB)
-
-**Hugging Face에서 다운로드 가능한 모델들**:
-
-| 모델명 | 파일 크기 | 설명 | 특징 |
-|--------|-----------|------|------|
-| **YOLOv9-c** | 205 MB | YOLOv9 Compact 버전 | 빠른 추론 속도, 실시간 처리에 적합 |
-| **YOLOv9-e** | 278 MB | YOLOv9 Extended 버전 | 높은 정확도, 정밀한 검출에 적합 |
-| **GELAN-c** | 102 MB | GELAN Compact 버전 | YOLOv9의 개선된 경량 버전 |
-| **GELAN-e** | 233 MB | GELAN Extended 버전 | GELAN의 확장 버전, 높은 정확도 |
-
-**모델 선택 가이드**:
-
-- **실시간 처리**: YOLOv9-c (205 MB) 또는 GELAN-c (102 MB)
-- **높은 정확도**: YOLOv9-e (278 MB) 또는 GELAN-e (233 MB)
-- **메모리 제약**: GELAN-c (102 MB) - 가장 작은 크기
-- **최고 성능**: YOLOv9-e (278 MB) - 가장 큰 모델
-
-참고: 모델 파일은 빌드 시 임베딩되므로 파일을 바꾸거나 추가한 경우 재빌드가 필요합니다.
-
-#### 3. 프로젝트 빌드
-
-```bash
-cargo build
-```
-
-### 실행
-
-```bash
-cargo run --release
-```
-
-## 프로젝트 구조
+## 📁 프로젝트 구조
 
 ```
 yolov9_onnx_test/
 ├── src/
-│   ├── main.rs          # 메인 실행 파일
-│   ├── lib.rs           # 핵심 라이브러리 (ONNX 추론, 이미지 처리, API)
-│   ├── gui.rs           # egui 기반 GUI 구현(오버레이, 줌/패닝, 테이블)
-│   └── models.rs        # 모델 파일 임베딩(include_dir), 목록/바이트 제공
+│   ├── lib.rs          # 메인 라이브러리
+│   ├── main.rs         # 애플리케이션 진입점
+│   ├── gui.rs          # GUI 구현
+│   ├── models.rs       # 임베디드 모델 관리
+│   ├── config.rs       # 설정 관리
+│   ├── error.rs        # 에러 처리
+│   └── utils.rs        # 유틸리티 함수들
+│       ├── image_utils     # 이미지 처리 유틸리티
+│       ├── math_utils      # 수학 계산 함수들
+│       ├── fs_utils        # 파일 시스템 유틸리티
+│       ├── perf_utils      # 성능 측정 도구
+│       └── color_utils     # 색상 처리 유틸리티
 ├── assets/
-│   └── models/
-│       ├── gelan-c.onnx
-│       ├── gelan-e.onnx
-│       ├── yolov9-c.onnx
-│       └── yolov9-e.onnx
-├── Cargo.toml
-└── README.md
+│   └── models/         # ONNX 모델 파일들
+├── Cargo.toml          # 프로젝트 의존성
+└── README.md           # 프로젝트 문서
 ```
 
-## 사용된 기술
+## 🔧 모듈 설명
 
-### 핵심 라이브러리
+### `lib.rs` - 메인 라이브러리
+- ONNX 모델 추론 로직
+- 이미지 전처리 및 후처리
+- NMS (Non-Maximum Suppression) 구현
+- 모델 캐싱 시스템
+- 데이터베이스 관리
+- **신뢰도 기반 바운딩 박스 색상 처리**
 
-- **ort**: ONNX Runtime Rust 바인딩 (v1.16.0)
-- **image**: 이미지 처리 및 변환
-- **ndarray**: 다차원 배열 연산
-- **imageproc**: 이미지 처리 및 그리기
+### `gui.rs` - GUI 구현
+- egui 기반 사용자 인터페이스
+- **자연로그 기반 줌 컨트롤**
+- 이미지 표시 및 줌 컨트롤
+- 검출 결과 테이블
+- 설정 패널
+- **바운딩 박스 색상 매핑 모드 선택**
 
-### GUI 라이브러리
+### `config.rs` - 설정 관리
+- 애플리케이션 설정 구조체
+- 모델, 추론, UI, 데이터베이스 설정
+- 기본값 관리
+- **바운딩 박스 색상 매핑 모드 정의**
 
-- **egui**: 즉시 모드 GUI 프레임워크
-- **eframe**: egui 애플리케이션 프레임워크
-- **rfd**: 파일 다이얼로그
+### `error.rs` - 에러 처리
+- **커스텀 에러 타입 정의** (`thiserror` 사용)
+- 에러 컨텍스트 제공
+- 유효성 검사 함수들
+- **패닉 방지 에러 처리**
 
-### 기타
+### `utils.rs` - 유틸리티 함수들
+- **이미지 처리 유틸리티** (`image_utils`)
+- **수학 계산 함수들** (`math_utils`)
+- **파일 시스템 유틸리티** (`fs_utils`)
+- **성능 측정 도구** (`perf_utils`)
+- **색상 처리 유틸리티** (`color_utils`)
 
-- **anyhow**: 에러 처리
+## 🛠️ 설치 및 실행
 
-## 기능 상세
+### 요구사항
+- Rust 1.70+
+- Windows/macOS/Linux
 
-### 객체 검출
-
-- 지원 모델: `gelan-c`, `gelan-e`, `yolov9-c`, `yolov9-e`
-- 80개 COCO 클래스 검출
-- 신뢰도 임계값: 기본 0.60 (설정에서 변경 가능)
-- NMS 임계값: 기본 0.20 (설정에서 변경 가능)
-- 바운딩 박스 좌표 변환 및 유효성 검증
-- 최대 검출 수: 50개로 제한(성능 안정화)
-- 출력 텐서 구조 예: (1, 84, N) 형태 처리
-
-### 이미지 처리
-
-- **레터박싱**: 종횡비를 유지하면서 640x640 리사이징
-- HWC → CHW 변환
-- 픽셀 값 정규화 (0-255 → 0-1)
-- 바운딩 박스 및 클래스 정보 시각화
-
-### GUI 인터페이스
-
-- **모델 선택**: 상단 콤보박스로 임베딩된 모델 선택(변경 시 1회 로딩 후 캐시)
-- **설정**: Confidence/NMS 슬라이더 + 직접 입력, 이미지 줌(슬라이더/텍스트/100%/Fit)
-- **검출 테이블**: 체크박스(표시 온오프), 헤더 클릭 정렬, Select All/None
-- **오버레이**: 원본 이미지 위에 bbox/라벨 egui로 렌더링(선택 항목만 표시)
-- **줌/패닝**: 우측 영역 어디서든 마우스 휠로 줌, 클릭 드래그로 스크롤 이동
-- **추론 시간/에러**: 상단에 표시
-
-## 프로그램 실행 흐름
-
-### 애플리케이션 시작 및 이미지 처리 흐름
-
-```mermaid
-flowchart TD
-    A[프로그램 시작] --> B[GUI 초기화]
-    B --> C[메인 윈도우 생성]
-    C --> D[좌측 패널: 검출 결과]
-    C --> E[우측 패널: 이미지 표시]
-    
-    F[이미지 선택 방법] --> G{선택 방식}
-    G -->|파일 선택 버튼| H[파일 다이얼로그 열기]
-    G -->|드래그 앤 드롭| I[이미지 파일 드롭]
-    
-    H --> J[이미지 파일 선택]
-    I --> J
-    J --> K[이미지 파일 읽기]
-    K --> L{파일 읽기 성공?]
-    L -->|실패| M[에러 메시지 표시]
-    L -->|성공| N[ModelCache 초기화]
-    
-    N --> O{모델 캐시 생성 성공?}
-    O -->|실패| P[캐시 초기화 에러 표시]
-    O -->|성공| Q[이미지 전처리 시작]
-    
-    Q --> R[레터박싱 리사이징]
-    R --> S[HWC → CHW 변환]
-    S --> T[픽셀 정규화 0-1]
-    T --> U[ONNX 모델 추론]
-    
-    U --> V[추론 시간 측정]
-    V --> W[모델 출력 파싱]
-    W --> X[바운딩 박스 좌표 추출]
-    X --> Y[클래스 확률 계산]
-    Y --> Z[신뢰도/NMS 후처리]
-    
-    Z --> AA[검출 결과 생성]
-    AA --> EE[GUI 텍스처 로딩(원본 이미지)]
-    EE --> GG[우측: egui 오버레이로 bbox/라벨 렌더]
-    EE --> FF[좌측: 검출 테이블/정렬/선택]
-    EE --> HH[추론 시간 표시]
+### 빌드
+```bash
+cargo build --release
 ```
 
-### 상세 처리 단계
-
-#### 1. 이미지 전처리 단계
-
-```mermaid
-flowchart LR
-    A[원본 이미지] --> B[종횡비 계산]
-    B --> C[레터박싱 리사이징]
-    C --> D[640x640 정사각형 캔버스]
-    D --> E[회색 패딩 추가]
-    E --> F[HWC → CHW 변환]
-    F --> G[픽셀 정규화 0-1]
-    G --> H[ONNX 입력 텐서]
+### 실행
+```bash
+cargo run
 ```
 
-#### 2. 모델 추론 및 후처리 단계
+## 🎮 사용법
 
-```mermaid
-flowchart LR
-    A[ONNX 모델 입력] --> B[YOLOv9/GELAN 추론]
-    B --> C[출력 텐서 [1, 84, N]]
-    C --> D[바운딩 박스 좌표 파싱]
-    C --> E[클래스 확률 계산]
-    D --> F[center_x, center_y, width, height]
-    E --> G[시그모이드 적용]
-    F --> H[레터박싱 좌표 변환]
-    G --> I[임계값/신뢰도 필터링]
-    H --> J[검출 결과 생성]
-    I --> J
-    J --> K[NMS 적용]
-    K --> L[GUI: egui 오버레이로 시각화]
-    L --> M[원본 텍스처 + 오버레이 결과]
+### 기본 사용법
+1. 애플리케이션 실행
+2. "Select Image" 버튼 클릭하여 이미지 선택
+3. 모델 선택 (기본: gelan-e.onnx)
+4. 신뢰도 및 NMS 임계값 조정
+5. **바운딩 박스 색상 매핑 모드 선택**
+6. 검출 결과 확인
+
+### 줌 컨트롤
+- **마우스 휠**: **자연로그 기반 세밀한 줌 조정**
+- **Ctrl + Plus/Minus**: 키보드 줌
+- **0**: 100% 줌으로 리셋
+- **1**: 50% 줌
+- **2**: 200% 줌
+
+### 설정 조정
+- **Confidence Threshold**: 검출 신뢰도 임계값 (0.1-1.0)
+- **NMS Threshold**: 중복 제거 임계값 (0.05-0.8)
+- **Image Zoom**: 이미지 확대/축소 (0.1x-20.0x)
+- **Color Mapping Mode**: 바운딩 박스 색상 매핑 방식
+
+## ⚙️ 설정 시스템
+
+### 설정 구조
+```rust
+pub struct AppConfig {
+    pub model: ModelConfig,        // 모델 관련 설정
+    pub inference: InferenceConfig, // 추론 관련 설정
+    pub ui: UiConfig,              // UI 관련 설정
+    pub database: DatabaseConfig,   // 데이터베이스 설정
+}
 ```
 
-## 성능
+### 주요 설정값들
+- **모델 입력 크기**: 640x640
+- **기본 신뢰도 임계값**: 0.6
+- **기본 NMS 임계값**: 0.2
+- **최대 검출 개수**: 50
+- **줌 범위**: 0.1x - 20.0x
+- **자연로그 줌 변화량**: 0.05 (매우 세밀한 제어)
 
-### 테스트 환경
+## 🔄 캐싱 시스템
 
-- **OS**: macOS 14.5.0
-- **CPU**: Apple Silicon
-- **ONNX Runtime**: v1.16.0
-- **테스트 이미지**: 164KB JPEG (640x480)
-
-### 성능 결과
-
-**모델별 성능 비교** (macOS M4 기준):
-
-| 모델 | 파일 크기 | 추론 시간 | 정확도 | 메모리 사용량 | 권장 용도 |
-|------|-----------|-----------|--------|---------------|-----------|
-| **GELAN-c** | 102 MB | ~150-200 ms | 높음 | 낮음 | 실시간 처리, 모바일 |
-| **YOLOv9-c** | 205 MB | ~200-300 ms | 높음 | 중간 | 일반적인 사용 |
-| **GELAN-e** | 233 MB | ~300-400 ms | 매우 높음 | 중간 | 정밀 검출 |
-| **YOLOv9-e** | 278 MB | ~400-500 ms | 최고 | 높음 | 연구, 정밀 분석 |
-
-**테스트 결과 예시** (YOLOv9-c 모델):
-
-```
-Found 4 objects:
-1. person (Confidence: 89.7%, BBox: [0.586, 0.051, 0.905, 1.000])
-2. person (Confidence: 86.9%, BBox: [0.093, 0.270, 0.905, 1.000])
-3. snowboard (Confidence: 72.0%, BBox: [0.338, 0.605, 0.412, 1.000])
-4. snowboard (Confidence: 58.2%, BBox: [0.771, 0.433, 0.885, 0.989])
-⏱️ Inference Time: ~200-300 ms
+### 데이터베이스 구조
+```sql
+CREATE TABLE inference_cache (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    image_path TEXT NOT NULL,
+    image_hash TEXT NOT NULL,
+    model_file_name TEXT NOT NULL,
+    model_name TEXT NOT NULL,
+    image_width INTEGER NOT NULL,
+    image_height INTEGER NOT NULL,
+    detections_json TEXT NOT NULL,
+    created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+    UNIQUE(image_path, model_file_name)
+);
 ```
 
-**성능 최적화 팁**:
+### 캐시 기능
+- 이미지 해시 기반 중복 검출
+- 모델별 캐시 분리
+- 자동 캐시 정리 (30일)
+- 강제 재추론 옵션
+- **Pre-NMS 데이터 저장으로 NMS 재실행 최적화**
 
-- **빠른 추론**: GELAN-c 모델 사용 (102 MB)
-- **정확도 우선**: YOLOv9-e 모델 사용 (278 MB)
-- **균형**: YOLOv9-c 모델 사용 (205 MB) - 기본 권장
+## 🎨 바운딩 박스 색상 시스템
 
-## 라이선스
+### 색상 매핑 모드
 
-이 프로젝트는 MIT 라이선스 하에 배포됩니다.
+#### 1. 고정 색상 모드 (Fixed)
+- 모든 바운딩 박스를 빨간색으로 표시
+- 가장 단순한 모드
 
-## 기여
+#### 2. 범위별 색상 모드 (Range-Based)
+- 5단계 색상 구분:
+  - 0.0-0.2: 파랑 (낮은 신뢰도)
+  - 0.2-0.4: 초록
+  - 0.4-0.6: 노랑
+  - 0.6-0.8: 주황
+  - 0.8-1.0: 빨강 (높은 신뢰도)
 
-버그 리포트, 기능 요청, 풀 리퀘스트를 환영합니다.
+#### 3. 그라데이션 모드 (Gradient)
+- 선형 색상 전환
+- 신뢰도에 따른 부드러운 색상 변화
 
----
+#### 4. HSV 기반 모드 (HSV-Based)
+- HSV 색상 공간을 활용한 자연스러운 전환
+- 가장 시각적으로 매력적인 모드
 
-**참고**: 이 프로젝트는 교육 및 연구 목적으로 개발되었습니다. 프로덕션 환경에서 사용하기 전에 충분한 테스트를 권장합니다.
+### 색상 처리 유틸리티
+```rust
+// 범위별 색상
+pub fn get_confidence_color(confidence: f32) -> Rgb<u8>
+
+// 그라데이션 색상
+pub fn get_confidence_color_gradient(confidence: f32) -> Rgb<u8>
+
+// HSV 기반 색상
+pub fn get_confidence_color_hsv(confidence: f32) -> Rgb<u8>
+```
+
+## 🚀 성능 최적화
+
+### 추론 최적화
+- ONNX Runtime 최적화 레벨 설정
+- 스레드 풀 최적화
+- 메모리 패턴 최적화
+- GPU 가속 지원 (macOS CoreML)
+- **Pre-NMS 데이터 캐싱으로 NMS 재실행 최적화**
+
+### GUI 최적화
+- **자연로그 기반 줌 제어** (매우 세밀한 조정)
+- 효율적인 이미지 렌더링
+- 가상화된 테이블 표시
+- 비동기 이미지 처리
+- **색상 매핑 최적화**
+
+## 🐛 에러 처리
+
+### 에러 타입 (`thiserror` 사용)
+- `ImageError`: 이미지 처리 오류
+- `OrtError`: ONNX 런타임 오류
+- `DatabaseError`: 데이터베이스 오류
+- `ValidationError`: 유효성 검사 오류
+- `ConfigError`: 설정 오류
+
+### 에러 처리 전략
+- **패닉 방지**: 모든 `unwrap()` 제거
+- Graceful degradation
+- 사용자 친화적 에러 메시지
+- 자동 복구 시도
+- 상세한 로깅
+- **커스텀 에러 타입으로 타입 안전성 확보**
+
+## 📊 성능 측정
+
+### 측정 항목
+- 추론 시간 (밀리초)
+- 이미지 로딩 시간
+- GUI 렌더링 시간
+- 캐시 히트율
+- **색상 처리 성능**
+
+### 성능 최적화 팁
+- SSD 사용 권장
+- 충분한 RAM 확보 (8GB+)
+- GPU 가속 활용 (지원 시)
+- 정기적인 캐시 정리
+- **자연로그 줌으로 부드러운 사용자 경험**
+
+## 🔧 개발 정보
+
+### 의존성
+- `ort`: ONNX Runtime
+- `egui`: GUI 프레임워크
+- `image`: 이미지 처리
+- `rusqlite`: SQLite 데이터베이스
+- `serde`: 직렬화/역직렬화
+- **`thiserror`: 커스텀 에러 처리**
+- **`once_cell`: 지연 정적 초기화**
+
+### 빌드 최적화
+```toml
+[profile.release]
+opt-level = 3
+lto = true
+codegen-units = 1
+panic = "abort"
+```
+
+### 코드 구조 개선
+- **모듈화**: `config`, `error`, `utils` 모듈 분리
+- **중앙화된 설정**: `CONFIG` 정적 인스턴스
+- **유틸리티 함수 분리**: 공통 기능 모듈화
+- **타입 안전성**: 커스텀 에러 타입 사용
+
+## 📝 라이센스
+
+이 프로젝트는 MIT 라이센스 하에 배포됩니다.
+
+## 🤝 기여
+
+버그 리포트, 기능 제안, 풀 리퀘스트를 환영합니다!
+
+## 📞 지원
+
+문제가 발생하면 이슈를 생성해 주세요.

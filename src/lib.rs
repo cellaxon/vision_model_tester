@@ -10,12 +10,21 @@ use serde::{Deserialize, Serialize};
 use rusqlite::{Connection, params};
 use sha2::{Sha256, Digest};
 
-// 상수 정의
-const MODEL_INPUT_SIZE: u32 = 640; // YOLOv9-c는 640x640 입력 사용
-const CONFIDENCE_THRESHOLD: f32 = 0.6; // 신뢰도 임계값을 더 높임
-const NMS_THRESHOLD: f32 = 0.2; // NMS 임계값을 더 낮춤
-const BBOX_COLOR: Rgb<u8> = Rgb([255, 0, 0]); // 빨간색
-// 파싱 시 기본 최소 신뢰도 (UI에서 별도 필터링을 위해 낮게 유지)
+// 모듈 선언
+pub mod config;
+pub mod error;
+pub mod utils;
+
+// 기존 상수들을 설정에서 가져오기
+use config::CONFIG;
+use error::{AppError, AppResult};
+use utils::{math_utils, fs_utils, color_utils};
+
+// 상수 정의 (기존 호환성을 위해 유지)
+const MODEL_INPUT_SIZE: u32 = 640;
+const CONFIDENCE_THRESHOLD: f32 = 0.6;
+const NMS_THRESHOLD: f32 = 0.2;
+const BBOX_COLOR: Rgb<u8> = Rgb([255, 0, 0]);
 const BASE_PARSE_CONFIDENCE: f32 = 0.05;
 
 // 임베디드 리소스: assets/models 폴더의 모든 onnx 파일을 임베딩 (분리된 모듈)
@@ -144,24 +153,7 @@ fn yolov9_id_to_label(class_id: u32) -> Option<&'static str> {
     }
 }
 
-/// IoU (Intersection over Union) 계산
-fn calculate_iou(box1: &[f32; 4], box2: &[f32; 4]) -> f32 {
-    let x1 = box1[0].max(box2[0]);
-    let y1 = box1[1].max(box2[1]);
-    let x2 = box1[2].min(box2[2]);
-    let y2 = box1[3].min(box2[3]);
-
-    if x2 <= x1 || y2 <= y1 {
-        return 0.0;
-    }
-
-    let intersection = (x2 - x1) * (y2 - y1);
-    let area1 = (box1[2] - box1[0]) * (box1[3] - box1[1]);
-    let area2 = (box2[2] - box2[0]) * (box2[3] - box2[1]);
-    let union = area1 + area2 - intersection;
-
-    intersection / union
-}
+// IoU 계산은 math_utils로 이동됨
 
 /// Non-Maximum Suppression (NMS) 구현
 fn non_maximum_suppression(detections: &mut Vec<Detection>, nms_threshold: f32) {
@@ -192,7 +184,7 @@ fn non_maximum_suppression(detections: &mut Vec<Detection>, nms_threshold: f32) 
             
             // 같은 클래스인 경우에만 NMS 적용
             if detections[i].class_id == detections[j].class_id {
-                let iou = calculate_iou(&detections[i].bbox, &detections[j].bbox);
+                let iou = math_utils::calculate_iou(&detections[i].bbox, &detections[j].bbox);
                 if iou > nms_threshold {
                     suppressed[j] = true;
                 }
@@ -227,13 +219,10 @@ fn post_process_detections(detections: &mut Vec<Detection>) {
     
     // 1. 너무 작은 바운딩 박스 제거
     detections.retain(|det| {
-        let [x1, y1, x2, y2] = det.bbox;
-        let width = x2 - x1;
-        let height = y2 - y1;
-        let area = width * height;
+        let area = math_utils::calculate_bbox_area(&det.bbox);
         
-        // 최소 면적 기준 (전체 이미지의 0.5% 이상)
-        area > 0.005
+        // 최소 면적 기준 (설정에서 가져오기)
+        area > CONFIG.inference.min_bbox_area
     });
     
     // 2. 같은 클래스 내에서 매우 유사한 위치의 박스 제거
@@ -242,10 +231,10 @@ fn post_process_detections(detections: &mut Vec<Detection>) {
     for i in 0..detections.len() {
         for j in (i + 1)..detections.len() {
             if detections[i].class_id == detections[j].class_id {
-                let iou = calculate_iou(&detections[i].bbox, &detections[j].bbox);
+                let iou = math_utils::calculate_iou(&detections[i].bbox, &detections[j].bbox);
                 
                 // IoU가 높거나 중심점이 매우 가까운 경우 제거
-                if iou > 0.1 || centers_are_close(&detections[i].bbox, &detections[j].bbox) {
+                if iou > CONFIG.inference.iou_threshold_for_duplicates || centers_are_close(&detections[i].bbox, &detections[j].bbox) {
                     // 신뢰도가 낮은 것을 제거
                     if detections[i].confidence > detections[j].confidence {
                         to_remove.push(j);
@@ -269,15 +258,10 @@ fn post_process_detections(detections: &mut Vec<Detection>) {
 
 /// 두 바운딩 박스의 중심점이 가까운지 확인
 fn centers_are_close(box1: &[f32; 4], box2: &[f32; 4]) -> bool {
-    let center1_x = (box1[0] + box1[2]) / 2.0;
-    let center1_y = (box1[1] + box1[3]) / 2.0;
-    let center2_x = (box2[0] + box2[2]) / 2.0;
-    let center2_y = (box2[1] + box2[3]) / 2.0;
+    let distance = math_utils::calculate_center_distance(box1, box2);
     
-    let distance = ((center1_x - center2_x).powi(2) + (center1_y - center2_y).powi(2)).sqrt();
-    
-    // 중심점 거리가 0.1 이하이면 가깝다고 판단
-    distance < 0.1
+    // 중심점 거리가 설정값 이하이면 가깝다고 판단
+    distance < CONFIG.inference.center_distance_threshold
 }
 
 /// 이미지 전처리: 리사이징, 레터박싱, 정규화
@@ -361,10 +345,7 @@ pub fn preprocess_image(image: &RgbImage) -> anyhow::Result<ArrayD<f32>> {
     )?)
 }
 
-/// 시그모이드 함수
-fn sigmoid(x: f32) -> f32 {
-    1.0 / (1.0 + (-x).exp())
-}
+// 시그모이드 함수는 math_utils로 이동됨
 
 /// YOLOv9 모델 출력 파싱
 pub fn parse_yolov9_outputs(
@@ -455,7 +436,7 @@ pub fn parse_yolov9_outputs(
             let raw_score = scores[[class_idx, box_idx]];
             // 점수 스케일링 (매우 작은 값들을 확대)
             let scaled_score = raw_score * 1000.0; // 스케일링 팩터
-            let conf = sigmoid(scaled_score); // 시그모이드 적용
+            let conf = math_utils::sigmoid(scaled_score); // 시그모이드 적용
             
             if conf > max_conf {
                 max_conf = conf;
@@ -571,7 +552,7 @@ pub fn parse_yolov9_outputs_pre_nms(
             
             let raw_score = scores[[class_idx, box_idx]];
             let scaled_score = raw_score * 1000.0;
-            let conf = sigmoid(scaled_score);
+            let conf = math_utils::sigmoid(scaled_score);
             if conf > max_conf {
                 max_conf = conf;
                 best_class = class_idx;
@@ -773,7 +754,7 @@ fn letterbox_to_original_coords(
 }
 
 /// 검출된 객체에 바운딩 박스 그리기
-pub fn draw_detections(image: &mut RgbImage, detections: &[Detection]) {
+pub fn draw_detections(image: &mut RgbImage, detections: &[Detection], color_mode: &config::ColorMappingMode) {
     for detection in detections {
         let [x1, y1, x2, y2] = detection.bbox;
         
@@ -792,8 +773,16 @@ pub fn draw_detections(image: &mut RgbImage, detections: &[Detection]) {
             continue;
         }
 
+        // 신뢰도에 따른 색상 결정 (전달받은 색상 매핑 방식 사용)
+        let color = match color_mode {
+            config::ColorMappingMode::Fixed => BBOX_COLOR,
+            config::ColorMappingMode::RangeBased => color_utils::get_confidence_color(detection.confidence),
+            config::ColorMappingMode::Gradient => color_utils::get_confidence_color_gradient(detection.confidence),
+            config::ColorMappingMode::HsvBased => color_utils::get_confidence_color_hsv(detection.confidence),
+        };
+
         let rect = Rect::at(x1, y1).of_size((x2 - x1).max(1) as u32, (y2 - y1).max(1) as u32);
-        draw_hollow_rect_mut(image, rect, BBOX_COLOR);
+        draw_hollow_rect_mut(image, rect, color);
     }
 }
 
@@ -887,37 +876,15 @@ pub struct InferenceDb {
 
 impl InferenceDb {
     /// DB 초기화 및 테이블 생성
-    pub fn new() -> anyhow::Result<Self> {
-        // 홈 디렉토리 경로 생성
-        let home_dir = match std::env::var("HOME") {
-            Ok(path) => path,
-            Err(_) => match std::env::var("USERPROFILE") {
-                Ok(path) => path,
-                Err(_) => match std::env::current_dir() {
-                    Ok(dir) => dir.to_string_lossy().to_string(),
-                    Err(_) => return Err(anyhow::anyhow!("Failed to determine home directory")),
-                },
-            },
-        };
+    pub fn new() -> AppResult<Self> {
+        // DB 파일 경로 가져오기
+        let db_path = fs_utils::get_database_path()?;
         
-        // DB 디렉토리 경로 생성
-        let db_dir = std::path::Path::new(&home_dir).join("cellaxon").join("yolov9_onnx_test");
-        
-        // 디렉토리가 없으면 생성
-        if !db_dir.exists() {
-            if let Err(e) = std::fs::create_dir_all(&db_dir) {
-                return Err(anyhow::anyhow!("Failed to create directory {:?}: {}", db_dir, e));
-            }
-        }
-        
-        let db_path = db_dir.join("inference_cache.db");
-        let conn = match Connection::open(&db_path) {
-            Ok(conn) => conn,
-            Err(e) => return Err(anyhow::anyhow!("Failed to open database at {:?}: {}", db_path, e)),
-        };
+        let conn = Connection::open(&db_path)
+            .map_err(|e| AppError::DatabaseError(e))?;
         
         // 테이블 생성
-        if let Err(e) = conn.execute(
+        conn.execute(
             "CREATE TABLE IF NOT EXISTS inference_cache (
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
                 image_path TEXT NOT NULL,
@@ -931,24 +898,18 @@ impl InferenceDb {
                 UNIQUE(image_path, model_file_name)
             )",
             [],
-        ) {
-            return Err(anyhow::anyhow!("Failed to create table: {}", e));
-        }
+        ).map_err(|e| AppError::DatabaseError(e))?;
         
         // 인덱스 생성 (성능 향상)
-        if let Err(e) = conn.execute(
+        conn.execute(
             "CREATE INDEX IF NOT EXISTS idx_image_hash ON inference_cache(image_hash)",
             [],
-        ) {
-            return Err(anyhow::anyhow!("Failed to create image_hash index: {}", e));
-        }
+        ).map_err(|e| AppError::DatabaseError(e))?;
         
-        if let Err(e) = conn.execute(
+        conn.execute(
             "CREATE INDEX IF NOT EXISTS idx_model_file ON inference_cache(model_file_name)",
             [],
-        ) {
-            return Err(anyhow::anyhow!("Failed to create model_file index: {}", e));
-        }
+        ).map_err(|e| AppError::DatabaseError(e))?;
         
         Ok(Self { conn })
     }

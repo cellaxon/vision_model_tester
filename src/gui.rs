@@ -6,11 +6,8 @@ use yolov9_onnx_test_lib::{
     InferenceDb, load_or_infer_pre_nms,
 };
 
-// 줌 제어 상수
-const MOUSE_WHEEL_ZOOM_DELTA: f32 = 0.02; // 마우스 휠 줌 변화량 (로그 공간)
-const KEYBOARD_ZOOM_DELTA: f32 = 0.05;    // 키보드 줌 변화량 (로그 공간)
-const MIN_ZOOM_LOG: f32 = -2.3;           // 최소 줌 로그값 (ln(0.1))
-const MAX_ZOOM_LOG: f32 = 3.0;            // 최대 줌 로그값 (ln(20.0))
+// 설정에서 줌 관련 상수 가져오기
+use yolov9_onnx_test_lib::config::CONFIG;
 
 /// GUI 애플리케이션 실행
 pub fn run_gui() {
@@ -53,6 +50,8 @@ struct YoloV9App {
     // 모델 선택
     available_models: Vec<String>,
     selected_model: String,
+    // 색상 매핑 방식
+    color_mapping_mode: yolov9_onnx_test_lib::config::ColorMappingMode,
 }
 
 impl Default for YoloV9App {
@@ -69,14 +68,15 @@ impl Default for YoloV9App {
             model_cache: None,
             inference_db: None,
             // 기본 설정값들
-            confidence_threshold: 0.6,
-            nms_threshold: 0.2,
-            image_zoom: 1.0,
+            confidence_threshold: CONFIG.ui.default_confidence_threshold,
+            nms_threshold: CONFIG.ui.default_nms_threshold,
+            image_zoom: CONFIG.ui.default_zoom,
             selection: Vec::new(),
             sort_by: DetectionSortBy::Index,
             sort_asc: true,
             available_models: get_embedded_model_list(),
             selected_model: "".to_string(),
+            color_mapping_mode: CONFIG.ui.bounding_box_color_mode.clone(),
         }
     }
 }
@@ -120,13 +120,13 @@ impl YoloV9App {
             // Ctrl + Plus/Minus: 줌 인/아웃 (더 세밀한 제어)
             if input.key_pressed(egui::Key::Plus) && input.modifiers.ctrl {
                 let current_log_zoom = self.image_zoom.ln();
-                let new_log_zoom = (current_log_zoom + KEYBOARD_ZOOM_DELTA).clamp(MIN_ZOOM_LOG, MAX_ZOOM_LOG);
+                let new_log_zoom = (current_log_zoom + CONFIG.ui.keyboard_zoom_delta).clamp(CONFIG.ui.min_zoom_log, CONFIG.ui.max_zoom_log);
                 self.image_zoom = new_log_zoom.exp();
             }
             
             if input.key_pressed(egui::Key::Minus) && input.modifiers.ctrl {
                 let current_log_zoom = self.image_zoom.ln();
-                let new_log_zoom = (current_log_zoom - KEYBOARD_ZOOM_DELTA).clamp(MIN_ZOOM_LOG, MAX_ZOOM_LOG);
+                let new_log_zoom = (current_log_zoom - CONFIG.ui.keyboard_zoom_delta).clamp(CONFIG.ui.min_zoom_log, CONFIG.ui.max_zoom_log);
                 self.image_zoom = new_log_zoom.exp();
             }
             
@@ -324,7 +324,7 @@ impl YoloV9App {
                 let mut log_zoom_value = log_zoom;
                 if ui
                     .add(
-                        egui::Slider::new(&mut log_zoom_value, MIN_ZOOM_LOG..=MAX_ZOOM_LOG)
+                        egui::Slider::new(&mut log_zoom_value, CONFIG.ui.min_zoom_log..=CONFIG.ui.max_zoom_log)
                             .text("Log Zoom")
                             .fixed_decimals(2),
                     )
@@ -350,7 +350,9 @@ impl YoloV9App {
                         }
                     }
                 }
+            });
 
+            ui.horizontal(|ui| {
                 // 줌 컨트롤 버튼들
                 if ui.button("100%").clicked() {
                     self.image_zoom = 1.0;
@@ -374,6 +376,52 @@ impl YoloV9App {
                     egui::Color32::from_rgb(150, 150, 255),
                     format!("Current: {:.3}x (log: {:.3})", self.image_zoom, self.image_zoom.ln()),
                 );
+            });
+
+            // 색상 매핑 방식 설정
+            ui.add_space(5.0);
+            ui.separator();
+            ui.label("Bounding Box Color Mapping:");
+            ui.horizontal(|ui| {
+                ui.label("Color Mode:");
+                egui::ComboBox::from_id_source("color_mapping_mode")
+                    .selected_text(match self.color_mapping_mode {
+                        yolov9_onnx_test_lib::config::ColorMappingMode::Fixed => "Fixed (Red)",
+                        yolov9_onnx_test_lib::config::ColorMappingMode::RangeBased => "Range-Based (5 levels)",
+                        yolov9_onnx_test_lib::config::ColorMappingMode::Gradient => "Gradient (Linear)",
+                        yolov9_onnx_test_lib::config::ColorMappingMode::HsvBased => "HSV-Based (Smooth)",
+                    })
+                    .show_ui(ui, |ui| {
+                        ui.selectable_value(
+                            &mut self.color_mapping_mode,
+                            yolov9_onnx_test_lib::config::ColorMappingMode::Fixed,
+                            "Fixed (Red)",
+                        );
+                        ui.selectable_value(
+                            &mut self.color_mapping_mode,
+                            yolov9_onnx_test_lib::config::ColorMappingMode::RangeBased,
+                            "Range-Based (5 levels)",
+                        );
+                        ui.selectable_value(
+                            &mut self.color_mapping_mode,
+                            yolov9_onnx_test_lib::config::ColorMappingMode::Gradient,
+                            "Gradient (Linear)",
+                        );
+                        ui.selectable_value(
+                            &mut self.color_mapping_mode,
+                            yolov9_onnx_test_lib::config::ColorMappingMode::HsvBased,
+                            "HSV-Based (Smooth)",
+                        );
+                    });
+            });
+
+            // 색상 매핑 설명
+            ui.collapsing("🎨 Color Mapping Info", |ui| {
+                ui.label("Color mapping based on confidence level:");
+                ui.label("• Fixed: All boxes are red");
+                ui.label("• Range-Based: 5 distinct colors (Blue→Green→Yellow→Orange→Red)");
+                ui.label("• Gradient: Smooth linear transition");
+                ui.label("• HSV-Based: Natural color transition using HSV space");
             });
 
             // 키보드 단축키 도움말
@@ -661,14 +709,14 @@ impl YoloV9App {
                         // 스크롤 델타에 따른 로그 공간에서의 변화량 (매우 세밀한 제어)
                         let log_delta = if scroll_delta > 0.0 {
                             // 확대: 매우 작은 증가량
-                            MOUSE_WHEEL_ZOOM_DELTA
+                            CONFIG.ui.mouse_wheel_zoom_delta
                         } else {
                             // 축소: 매우 작은 감소량
-                            -MOUSE_WHEEL_ZOOM_DELTA
+                            -CONFIG.ui.mouse_wheel_zoom_delta
                         };
                         
                         // 새로운 로그 줌 값 계산
-                        let new_log_zoom = (current_log_zoom + log_delta).clamp(MIN_ZOOM_LOG, MAX_ZOOM_LOG);
+                        let new_log_zoom = (current_log_zoom + log_delta).clamp(CONFIG.ui.min_zoom_log, CONFIG.ui.max_zoom_log);
                         
                         // 로그 공간에서 다시 선형 공간으로 변환
                         self.image_zoom = new_log_zoom.exp();
@@ -721,8 +769,24 @@ impl YoloV9App {
                             rect.top() + y2 * rect.height(),
                         );
 
-                        // 박스 (라인 세그먼트로 사각형 그리기: 버전 차이 회피)
-                        let box_color = egui::Color32::from_rgb(255, 0, 0);
+                        // 신뢰도에 따른 색상 결정
+                        let box_color = match self.color_mapping_mode {
+                            yolov9_onnx_test_lib::config::ColorMappingMode::Fixed => {
+                                egui::Color32::from_rgb(255, 0, 0)
+                            }
+                            yolov9_onnx_test_lib::config::ColorMappingMode::RangeBased => {
+                                let color = yolov9_onnx_test_lib::utils::color_utils::get_confidence_color(det.confidence);
+                                egui::Color32::from_rgb(color[0], color[1], color[2])
+                            }
+                            yolov9_onnx_test_lib::config::ColorMappingMode::Gradient => {
+                                let color = yolov9_onnx_test_lib::utils::color_utils::get_confidence_color_gradient(det.confidence);
+                                egui::Color32::from_rgb(color[0], color[1], color[2])
+                            }
+                            yolov9_onnx_test_lib::config::ColorMappingMode::HsvBased => {
+                                let color = yolov9_onnx_test_lib::utils::color_utils::get_confidence_color_hsv(det.confidence);
+                                egui::Color32::from_rgb(color[0], color[1], color[2])
+                            }
+                        };
                         let stroke = egui::Stroke::new(2.0, box_color);
                         let p1 = p_min; // 좌상
                         let p2 = egui::pos2(p_max.x, p_min.y); // 우상
