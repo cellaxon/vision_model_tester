@@ -414,7 +414,14 @@ impl YoloV9App {
                         .spacing([6.0, 4.0])
                         .show(ui, |ui| {
                             // 헤더 (클릭해서 정렬)
-                            ui.label(egui::RichText::new("Sel").strong());
+                            // Sel 헤더: 전체 선택/해제 토글
+                            let all_selected =
+                                !self.selection.is_empty() && self.selection.iter().all(|&s| s);
+                            let sel_hdr = if all_selected { "Sel (All)" } else { "Sel" };
+                            if ui.button(sel_hdr).clicked() {
+                                let to = !all_selected;
+                                self.selection.fill(to);
+                            }
 
                             let mut hdr = String::from("#");
                             if self.sort_by == DetectionSortBy::Index {
