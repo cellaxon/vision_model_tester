@@ -2,8 +2,11 @@ use eframe::egui;
 use std::fs;
 use std::path::PathBuf;
 use yolov9_onnx_test_lib::{
-    Detection, ModelCache, detect_objects_with_settings, get_embedded_model_list, get_model_info,
+    apply_nms_only, get_embedded_model_list, get_model_info, load_output_tensor_json,
+    run_inference_get_output, save_output_tensor_json, Detection, ModelCache,
+    parse_yolov9_outputs_pre_nms,
 };
+use ndarray::ArrayD;
 
 /// GUI 애플리케이션 실행
 pub fn run_gui() {
@@ -24,6 +27,7 @@ pub fn run_gui() {
 /// YOLOv9 GUI 애플리케이션 구조체
 struct YoloV9App {
     detections: Vec<Detection>,
+    pre_nms_detections: Vec<Detection>,
     is_processing: bool,
     error_message: Option<String>,
     selected_image_path: Option<PathBuf>,
@@ -50,6 +54,7 @@ impl Default for YoloV9App {
     fn default() -> Self {
         Self {
             detections: Vec::new(),
+            pre_nms_detections: Vec::new(),
             is_processing: false,
             error_message: None,
             selected_image_path: None,
@@ -194,6 +199,7 @@ impl YoloV9App {
                     .changed()
                 {
                     self.confidence_threshold = confidence;
+                    self.update_selection_by_confidence();
                 }
 
                 // 숫자 입력 박스
@@ -208,6 +214,7 @@ impl YoloV9App {
                     if let Ok(value) = confidence_text.parse::<f32>() {
                         if value >= 0.1 && value <= 1.0 {
                             self.confidence_threshold = value;
+                            self.update_selection_by_confidence();
                         }
                     }
                 }
@@ -229,6 +236,7 @@ impl YoloV9App {
                     .changed()
                 {
                     self.nms_threshold = nms;
+                    self.reapply_nms_only();
                 }
 
                 // 숫자 입력 박스
@@ -243,6 +251,7 @@ impl YoloV9App {
                     if let Ok(value) = nms_text.parse::<f32>() {
                         if value >= 0.05 && value <= 0.8 {
                             self.nms_threshold = value;
+                            self.reapply_nms_only();
                         }
                     }
                 }
@@ -308,17 +317,17 @@ impl YoloV9App {
 
             ui.add_space(5.0);
 
-            // 재처리 버튼
+            // 재처리 버튼 (캐시 무시 후 강제 재추론)
             if ui
                 .add_sized(
                     egui::vec2(380.0, 30.0),
-                    egui::Button::new("🔄 Reprocess with New Settings"),
+                    egui::Button::new("🔄 Force Re-infer (ignore JSON cache)"),
                 )
                 .clicked()
                 && !self.is_processing
             {
                 if let Some(path) = &self.selected_image_path {
-                    self.process_image(ui.ctx(), path.clone());
+                    self.process_image_with_force(ui.ctx(), path.clone());
                 }
             }
         });
@@ -699,24 +708,57 @@ impl YoloV9App {
                     }
                 }
 
-                // 객체 검출 실행 (설정된 임계값 사용)
+                // 추론 결과 JSON 캐시 확인
+                let mut used_cache = false;
+                let mut output_array_opt: Option<ArrayD<f32>> = None;
+                if let Ok(Some((model_in_json, array))) = load_output_tensor_json(&path) {
+                    if model_in_json == self.selected_model {
+                        used_cache = true;
+                        output_array_opt = Some(array);
+                        // 캐시 사용 시 추론 시간 표시는 생략
+                        self.inference_time_ms = None;
+                        // 텍스처는 원본 이미지에서 생성
+                        if let Ok(img) = image::load_from_memory(&image_data) {
+                            self.load_texture(ctx, img.to_rgb8());
+                        }
+                    }
+                }
+
                 if let Some(cache) = &mut self.model_cache {
-                    match detect_objects_with_settings(
-                        &image_data,
-                        cache,
-                        &self.selected_model,
-                        self.confidence_threshold,
-                        self.nms_threshold,
-                    ) {
-                        Ok(result) => {
-                            self.detections = result.detections;
-                            // 선택 상태 초기화 (기본 전체 선택)
+                    if !used_cache {
+                        // 추론 실행 1회
+                        match run_inference_get_output(&image_data, cache, &self.selected_model) {
+                            Ok((output_array, infer_ms, result_img)) => {
+                                self.inference_time_ms = Some(infer_ms);
+                                // JSON 저장
+                                if let Err(e) = save_output_tensor_json(&path, &self.selected_model, &output_array) {
+                                    eprintln!("Failed to save JSON cache: {}", e);
+                                }
+                                output_array_opt = Some(output_array);
+                                self.load_texture(ctx, result_img);
+                            }
+                            Err(e) => {
+                                self.error_message = Some(format!("Detection error: {}", e));
+                            }
+                        }
+                    }
+                }
+
+                // 출력 텐서 -> pre-NMS 파싱 -> NMS 적용 -> 선택 갱신
+                if let Some(output_array) = output_array_opt {
+                    let view = output_array.view();
+                    // 이미지 크기는 로드된 텍스처의 크기 사용
+                    let w = self.image_size.x.max(1.0) as u32;
+                    let h = self.image_size.y.max(1.0) as u32;
+                    match parse_yolov9_outputs_pre_nms(&view, w, h) {
+                        Ok(pre) => {
+                            self.pre_nms_detections = pre;
+                            self.detections = apply_nms_only(self.pre_nms_detections.clone(), self.nms_threshold);
                             self.selection = vec![true; self.detections.len()];
-                            self.inference_time_ms = Some(result.inference_time_ms);
-                            self.load_texture(ctx, result.result_image);
+                            self.update_selection_by_confidence();
                         }
                         Err(e) => {
-                            self.error_message = Some(format!("Detection error: {}", e));
+                            self.error_message = Some(format!("Parsing error: {}", e));
                         }
                     }
                 }
@@ -727,6 +769,36 @@ impl YoloV9App {
         }
 
         self.is_processing = false;
+    }
+
+    /// 강제 재추론(캐시 무시)
+    fn process_image_with_force(&mut self, ctx: &egui::Context, path: PathBuf) {
+        // 기존 JSON 삭제 후 일반 처리
+        let _ = std::fs::remove_file(path.with_extension("json"));
+        self.process_image(ctx, path);
+    }
+
+    fn update_selection_by_confidence(&mut self) {
+        if self.detections.is_empty() {
+            self.selection.clear();
+            return;
+        }
+        if self.selection.len() != self.detections.len() {
+            self.selection = vec![true; self.detections.len()];
+        }
+        for (i, det) in self.detections.iter().enumerate() {
+            self.selection[i] = det.confidence >= self.confidence_threshold;
+        }
+    }
+
+    fn reapply_nms_only(&mut self) {
+        if self.pre_nms_detections.is_empty() {
+            return;
+        }
+        self.detections = apply_nms_only(self.pre_nms_detections.clone(), self.nms_threshold);
+        // NMS 변경 시에도 체크박스는 confidence 기준으로 갱신
+        self.selection = vec![true; self.detections.len()];
+        self.update_selection_by_confidence();
     }
 
     /// 텍스처 로딩

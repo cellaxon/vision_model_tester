@@ -5,6 +5,8 @@ use ndarray::CowArray;
 use ndarray::{ArrayD, IxDyn};
 use ort::execution_providers::CPUExecutionProviderOptions;
 use ort::{Environment, ExecutionProvider, SessionBuilder, Value};
+use serde::{Deserialize, Serialize};
+use std::path::Path;
 use std::sync::Arc;
 
 // 상수 정의
@@ -12,6 +14,8 @@ const MODEL_INPUT_SIZE: u32 = 640; // YOLOv9-c는 640x640 입력 사용
 const CONFIDENCE_THRESHOLD: f32 = 0.6; // 신뢰도 임계값을 더 높임
 const NMS_THRESHOLD: f32 = 0.2; // NMS 임계값을 더 낮춤
 const BBOX_COLOR: Rgb<u8> = Rgb([255, 0, 0]); // 빨간색
+// 파싱 시 기본 최소 신뢰도 (UI에서 별도 필터링을 위해 낮게 유지)
+const BASE_PARSE_CONFIDENCE: f32 = 0.05;
 
 // 임베디드 리소스: assets/models 폴더의 모든 onnx 파일을 임베딩 (분리된 모듈)
 mod models;
@@ -488,8 +492,186 @@ pub fn parse_yolov9_outputs(
     
     // NMS 적용 (GUI에서 설정한 임계값 사용)
     non_maximum_suppression(&mut detections, nms_threshold);
-    
+
     Ok(detections)
+}
+
+/// YOLOv9 모델 출력 파싱 (NMS 적용 전 단계, 낮은 기본 신뢰도 사용)
+pub fn parse_yolov9_outputs_pre_nms(
+    output_tensor: &ndarray::ArrayViewD<f32>,
+    original_width: u32,
+    original_height: u32,
+) -> anyhow::Result<Vec<Detection>> {
+    // 내부적으로 기존 파서를 재사용하되, 낮은 신뢰도와 NMS 미적용을 위해 별도로 구현
+    let mut detections = Vec::new();
+
+    let shape = output_tensor.shape();
+    if shape.len() != 3 {
+        return Err(anyhow::anyhow!("Invalid output tensor shape: expected 3 dimensions"));
+    }
+
+    let (num_boxes, num_classes) = if shape[1] == 84 {
+        (shape[2], 80)
+    } else if shape[1] == 85 {
+        (shape[2], 80)
+    } else {
+        (shape[2], shape[1] - 4)
+    };
+
+    let output_data = output_tensor.to_owned();
+    let boxes = output_data.slice(ndarray::s![0, 0..4, ..]);
+    let scores = output_data.slice(ndarray::s![0, 4.., ..]);
+
+    for box_idx in 0..num_boxes {
+        let cx = boxes[[0, box_idx]];
+        let cy = boxes[[1, box_idx]];
+        let w = boxes[[2, box_idx]];
+        let h = boxes[[3, box_idx]];
+
+        let cx_norm = cx / MODEL_INPUT_SIZE as f32;
+        let cy_norm = cy / MODEL_INPUT_SIZE as f32;
+        let w_norm = w / MODEL_INPUT_SIZE as f32;
+        let h_norm = h / MODEL_INPUT_SIZE as f32;
+
+        if w_norm <= 0.0 || h_norm <= 0.0 || w_norm > 1.0 || h_norm > 1.0 {
+            continue;
+        }
+        if cx_norm < 0.0 || cx_norm > 1.0 || cy_norm < 0.0 || cy_norm > 1.0 {
+            continue;
+        }
+
+        let mut max_conf = 0.0;
+        let mut best_class = 0;
+        for class_idx in 0..num_classes {
+            let raw_score = scores[[class_idx, box_idx]];
+            let scaled_score = raw_score * 1000.0;
+            let conf = sigmoid(scaled_score);
+            if conf > max_conf {
+                max_conf = conf;
+                best_class = class_idx;
+            }
+        }
+
+        if max_conf > BASE_PARSE_CONFIDENCE {
+            let x1 = (cx_norm - w_norm / 2.0).max(0.0).min(1.0);
+            let y1 = (cy_norm - h_norm / 2.0).max(0.0).min(1.0);
+            let x2 = (cx_norm + w_norm / 2.0).max(0.0).min(1.0);
+            let y2 = (cy_norm + h_norm / 2.0).max(0.0).min(1.0);
+
+            if x1 >= x2
+                || y1 >= y2
+                || (x2 - x1) < 0.02
+                || (y2 - y1) < 0.02
+                || (x2 - x1) > 0.95
+                || (y2 - y1) > 0.95
+            {
+                continue;
+            }
+
+            let original_bbox =
+                letterbox_to_original_coords([x1, y1, x2, y2], original_width, original_height);
+
+            let [ox1, oy1, ox2, oy2] = original_bbox;
+            if ox1 >= ox2
+                || oy1 >= oy2
+                || (ox2 - ox1) < 0.02
+                || (oy2 - oy1) < 0.02
+                || (ox2 - ox1) > 0.95
+                || (oy2 - oy1) > 0.95
+            {
+                continue;
+            }
+
+            if let Some(class_name) = yolov9_id_to_label(best_class as u32) {
+                detections.push(Detection {
+                    bbox: original_bbox,
+                    confidence: max_conf,
+                    class_id: best_class as u32,
+                    class_name: class_name.to_string(),
+                });
+            }
+        }
+    }
+
+    Ok(detections)
+}
+
+/// 외부에서 호출 가능한 NMS 전용 함수 (검출 리스트에만 적용)
+pub fn apply_nms_only(mut detections: Vec<Detection>, nms_threshold: f32) -> Vec<Detection> {
+    non_maximum_suppression(&mut detections, nms_threshold);
+    detections
+}
+
+/// 추론을 실행하고 원시 출력 텐서를 반환 (이미지와 소요 시간 포함)
+pub fn run_inference_get_output(
+    image_data: &[u8],
+    cache: &mut ModelCache,
+    model_file_name: &str,
+) -> anyhow::Result<(ArrayD<f32>, f64, RgbImage)> {
+    let img = ImageReader::new(std::io::Cursor::new(image_data))
+        .with_guessed_format()?
+        .decode()?
+        .to_rgb8();
+
+    let session = cache.get_session(model_file_name)?;
+    let input_array = preprocess_image(&img)?;
+    let cow_array = CowArray::from(&input_array);
+    let input_value = Value::from_array(session.allocator(), &cow_array)?;
+
+    let start_time = std::time::Instant::now();
+    let outputs = session.run(vec![input_value])?;
+    let inference_time_ms = start_time.elapsed().as_secs_f64() * 1000.0;
+
+    if let Some(output) = outputs.first() {
+        let output_tensor = output.try_extract::<f32>()?;
+        let output_view = output_tensor.view();
+        let owned: ArrayD<f32> = output_view.to_owned();
+        Ok((owned, inference_time_ms, img))
+    } else {
+        Err(anyhow::anyhow!("No output tensor returned by session.run"))
+    }
+}
+
+/// JSON 캐시에 저장할 출력 텐서 데이터 구조
+#[derive(Serialize, Deserialize)]
+pub struct InferenceCacheJson {
+    pub model_file_name: String,
+    pub model_name: String,
+    pub output_shape: Vec<usize>,
+    pub output_data: Vec<f32>,
+}
+
+/// 출력 텐서를 이미지 경로와 동일한 이름의 JSON으로 저장
+pub fn save_output_tensor_json(
+    image_path: &Path,
+    model_file_name: &str,
+    output: &ArrayD<f32>,
+) -> anyhow::Result<()> {
+    let (model_name, _input) = get_model_info(model_file_name);
+    let json = InferenceCacheJson {
+        model_file_name: model_file_name.to_string(),
+        model_name,
+        output_shape: output.shape().to_vec(),
+        output_data: output.iter().copied().collect(),
+    };
+    let json_path = image_path.with_extension("json");
+    let text = serde_json::to_string_pretty(&json)?;
+    std::fs::write(json_path, text)?;
+    Ok(())
+}
+
+/// 이미지 경로와 동일한 이름의 JSON에서 출력 텐서를 로드
+/// 반환: Some((model_file_name, ArrayD)) 또는 None (파일 없음/형식 오류)
+pub fn load_output_tensor_json(image_path: &Path) -> anyhow::Result<Option<(String, ArrayD<f32>)>> {
+    let json_path = image_path.with_extension("json");
+    if !json_path.exists() {
+        return Ok(None);
+    }
+    let text = std::fs::read_to_string(&json_path)?;
+    let parsed: InferenceCacheJson = serde_json::from_str(&text)?;
+    // ArrayD 재구성
+    let array = ArrayD::from_shape_vec(IxDyn(&parsed.output_shape), parsed.output_data)?;
+    Ok(Some((parsed.model_file_name, array)))
 }
 
 /// 레터박싱 좌표를 원본 이미지 좌표로 변환
