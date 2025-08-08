@@ -13,38 +13,25 @@ const CONFIDENCE_THRESHOLD: f32 = 0.6; // 신뢰도 임계값을 더 높임
 const NMS_THRESHOLD: f32 = 0.2; // NMS 임계값을 더 낮춤
 const BBOX_COLOR: Rgb<u8> = Rgb([255, 0, 0]); // 빨간색
 
-// 임베디드 리소스 (YOLOv9-c 모델)
-static YOLOV9_C_ONNX: &[u8] = include_bytes!("../assets/models/gelan-e.onnx");
+// 임베디드 리소스: assets/models 폴더의 모든 onnx 파일을 임베딩 (분리된 모듈)
+mod models;
+use models::get_embedded_model_bytes;
+pub use models::get_embedded_model_list;
 
-
-/// 모델 파일 이름을 파싱하여 모델 정보를 반환하는 함수
-pub fn get_model_info() -> (String, u32) {
-    // 파일 경로에서 모델 이름 추출
-    let model_path = "../assets/models/gelan-e.onnx";
-    let file_name = std::path::Path::new(model_path)
-        .file_name()
-        .and_then(|name| name.to_str())
-        .unwrap_or("unknown.onnx");
-    
-    // 파일 이름에서 모델 타입 추출
-    let model_name = if file_name.contains("gelan-e") {
+pub fn get_model_info(selected_file_name: &str) -> (String, u32) {
+    // 지원 파일: gelan-c.onnx, gelan-e.onnx, yolov9-c.onnx, yolov9-e.onnx
+    let lower = selected_file_name.to_ascii_lowercase();
+    let model_name = if lower.contains("gelan-e") {
         "YOLOv9-GELAN-E"
-    } else if file_name.contains("gelan-c") {
+    } else if lower.contains("gelan-c") {
         "YOLOv9-GELAN-C"
-    } else if file_name.contains("gelan-n") {
-        "YOLOv9-GELAN-N"
-    } else if file_name.contains("gelan-s") {
-        "YOLOv9-GELAN-S"
-    } else if file_name.contains("gelan-m") {
-        "YOLOv9-GELAN-M"
-    } else if file_name.contains("gelan-l") {
-        "YOLOv9-GELAN-L"
-    } else if file_name.contains("gelan-x") {
-        "YOLOv9-GELAN-X"
+    } else if lower.contains("yolov9-e") {
+        "YOLOv9-E"
+    } else if lower.contains("yolov9-c") {
+        "YOLOv9-C"
     } else {
         "YOLOv9-Unknown"
     };
-    
     (model_name.to_string(), MODEL_INPUT_SIZE)
 }
 
@@ -583,6 +570,7 @@ pub fn draw_detections(image: &mut RgbImage, detections: &[Detection]) {
 pub struct ModelCache {
     environment: Arc<Environment>,
     session: Option<ort::InMemorySession<'static>>,
+    current_model_file: Option<String>,
 }
 
 impl ModelCache {
@@ -598,11 +586,16 @@ impl ModelCache {
         Ok(Self {
             environment,
             session: None,
+            current_model_file: None,
         })
     }
 
-    pub fn get_session(&mut self) -> anyhow::Result<&ort::InMemorySession<'static>> {
-        if self.session.is_none() {
+    pub fn get_session(&mut self, model_file_name: &str) -> anyhow::Result<&ort::InMemorySession<'static>> {
+        let need_reload = match &self.current_model_file {
+            Some(cur) => cur != model_file_name,
+            None => true,
+        };
+        if need_reload {
             #[cfg(target_os = "macos")]
             let session = SessionBuilder::new(&self.environment)?
                 .with_execution_providers([
@@ -622,7 +615,7 @@ impl ModelCache {
                 // 3. 메모리 최적화
                 .with_memory_pattern(true)? // 고정 입력 크기라면 활성화
                 .with_allocator(ort::AllocatorType::Device)? // GPU 메모리 사용
-                .with_model_from_memory(YOLOV9_C_ONNX)?;
+                .with_model_from_memory(self.load_embedded_model_bytes(model_file_name)?)?;
             #[cfg(not(target_os = "macos"))]
             let session = SessionBuilder::new(&self.environment)?
                 .with_execution_providers([ExecutionProvider::CPU(
@@ -637,10 +630,11 @@ impl ModelCache {
                 // 3. 메모리 최적화
                 .with_memory_pattern(true)? // 고정 입력 크기라면 활성화
                 .with_allocator(ort::AllocatorType::Device)? // GPU 메모리 사용
-                .with_model_from_memory(YOLOV9_C_ONNX)?;
+                .with_model_from_memory(self.load_embedded_model_bytes(model_file_name)?)?;
 
             self.session = Some(session);
-            println!("Loading model: YOLOv9-c - Optimized for inference");
+            self.current_model_file = Some(model_file_name.to_string());
+            println!("Loading model: {} - Optimized for inference", model_file_name);
         }
 
         match self.session.as_ref() {
@@ -649,10 +643,9 @@ impl ModelCache {
         }
     }
 
-    /// 모델을 미리 로드
-    pub fn preload_model(&mut self) -> anyhow::Result<()> {
-        self.get_session()?;
-        Ok(())
+    /// 임베디드 모델 바이트 로드
+    fn load_embedded_model_bytes(&self, file_name: &str) -> anyhow::Result<&'static [u8]> {
+        get_embedded_model_bytes(file_name)
     }
 }
 
@@ -660,6 +653,7 @@ impl ModelCache {
 pub fn detect_objects_with_cache(
     image_data: &[u8],
     cache: &mut ModelCache,
+    model_file_name: &str,
 ) -> anyhow::Result<DetectionResult> {
     // 이미지 로드
     let img = ImageReader::new(std::io::Cursor::new(image_data))
@@ -667,8 +661,8 @@ pub fn detect_objects_with_cache(
         .decode()?
         .to_rgb8();
 
-    // 캐시된 세션 가져오기
-    let session = cache.get_session()?;
+    // 캐시된 세션 가져오기 (선택된 모델 기준)
+    let session = cache.get_session(model_file_name)?;
 
     // 이미지 전처리
     let input_array = preprocess_image(&img)?;
@@ -695,9 +689,8 @@ pub fn detect_objects_with_cache(
         detections = parse_yolov9_outputs(&output_view, img.width(), img.height(), CONFIDENCE_THRESHOLD, NMS_THRESHOLD)?;
     }
 
-    // 바운딩 박스가 포함된 이미지 생성
-    let mut result_image = img.clone();
-    draw_detections(&mut result_image, &detections);
+    // 원본 이미지를 그대로 반환 (bbox는 GUI에서 오버레이로 렌더링)
+    let result_image = img.clone();
 
     Ok(DetectionResult {
         detections,
@@ -710,13 +703,14 @@ pub fn detect_objects_with_cache(
 pub fn detect_objects(image_data: &[u8]) -> anyhow::Result<DetectionResult> {
     // ModelCache를 생성하여 사용
     let mut cache = ModelCache::new()?;
-    detect_objects_with_cache(image_data, &mut cache)
+    detect_objects_with_cache(image_data, &mut cache, "gelan-e.onnx")
 }
 
 /// 설정 가능한 임계값으로 객체 검출 함수
 pub fn detect_objects_with_settings(
     image_data: &[u8],
     cache: &mut ModelCache,
+    model_file_name: &str,
     confidence_threshold: f32,
     nms_threshold: f32,
 ) -> anyhow::Result<DetectionResult> {
@@ -726,8 +720,8 @@ pub fn detect_objects_with_settings(
         .decode()?
         .to_rgb8();
 
-    // 캐시된 세션 가져오기
-    let session = cache.get_session()?;
+    // 캐시된 세션 가져오기 (선택된 모델 기준)
+    let session = cache.get_session(model_file_name)?;
 
     // 이미지 전처리
     let input_array = preprocess_image(&img)?;
@@ -754,9 +748,8 @@ pub fn detect_objects_with_settings(
         detections = parse_yolov9_outputs(&output_view, img.width(), img.height(), confidence_threshold, nms_threshold)?;
     }
 
-    // 바운딩 박스가 포함된 이미지 생성
-    let mut result_image = img.clone();
-    draw_detections(&mut result_image, &detections);
+    // 원본 이미지를 그대로 반환 (bbox는 GUI에서 오버레이로 렌더링)
+    let result_image = img.clone();
 
     Ok(DetectionResult {
         detections,
