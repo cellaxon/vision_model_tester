@@ -9,13 +9,14 @@ pub fn get_embedded_model_list() -> Vec<String> {
         .files()
         .filter_map(|f| {
             let path = f.path();
-            if let Some(ext) = path.extension() {
-                if ext == "onnx" {
-                    // 안전한 파일명 추출
-                    return path.file_name()
-                        .and_then(|name| name.to_str())
-                        .map(|s| s.to_string());
-                }
+            if let Some(ext) = path.extension()
+                && ext == "onnx"
+            {
+                // 안전한 파일명 추출
+                return path
+                    .file_name()
+                    .and_then(|name| name.to_str())
+                    .map(|s| s.to_string());
             }
             None
         })
@@ -27,7 +28,8 @@ pub fn get_embedded_model_bytes(file_name: &str) -> anyhow::Result<&'static [u8]
     let file = ASSETS_MODELS_DIR
         .files()
         .find(|f| {
-            f.path().file_name()
+            f.path()
+                .file_name()
                 .and_then(|name| name.to_str())
                 .map(|s| s == file_name)
                 .unwrap_or(false)

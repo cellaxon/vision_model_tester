@@ -2,8 +2,8 @@ use eframe::egui;
 use std::fs;
 use std::path::PathBuf;
 use yolov9_onnx_test_lib::{
-    apply_nms_only, get_embedded_model_list, get_model_info, Detection, ModelCache,
-    InferenceDb, load_or_infer_pre_nms,
+    Detection, InferenceDb, ModelCache, apply_nms_only, get_embedded_model_list, get_model_info,
+    load_or_infer_pre_nms,
 };
 
 // 설정에서 줌 관련 상수 가져오기
@@ -120,26 +120,28 @@ impl YoloV9App {
             // Ctrl + Plus/Minus: 줌 인/아웃 (더 세밀한 제어)
             if input.key_pressed(egui::Key::Plus) && input.modifiers.ctrl {
                 let current_log_zoom = self.image_zoom.ln();
-                let new_log_zoom = (current_log_zoom + CONFIG.ui.keyboard_zoom_delta).clamp(CONFIG.ui.min_zoom_log, CONFIG.ui.max_zoom_log);
+                let new_log_zoom = (current_log_zoom + CONFIG.ui.keyboard_zoom_delta)
+                    .clamp(CONFIG.ui.min_zoom_log, CONFIG.ui.max_zoom_log);
                 self.image_zoom = new_log_zoom.exp();
             }
-            
+
             if input.key_pressed(egui::Key::Minus) && input.modifiers.ctrl {
                 let current_log_zoom = self.image_zoom.ln();
-                let new_log_zoom = (current_log_zoom - CONFIG.ui.keyboard_zoom_delta).clamp(CONFIG.ui.min_zoom_log, CONFIG.ui.max_zoom_log);
+                let new_log_zoom = (current_log_zoom - CONFIG.ui.keyboard_zoom_delta)
+                    .clamp(CONFIG.ui.min_zoom_log, CONFIG.ui.max_zoom_log);
                 self.image_zoom = new_log_zoom.exp();
             }
-            
+
             // 숫자 키 0: 줌 리셋 (100%)
             if input.key_pressed(egui::Key::Num0) {
                 self.image_zoom = 1.0;
             }
-            
+
             // 숫자 키 1: 50% 줌
             if input.key_pressed(egui::Key::Num1) {
                 self.image_zoom = 0.5;
             }
-            
+
             // 숫자 키 2: 200% 줌
             if input.key_pressed(egui::Key::Num2) {
                 self.image_zoom = 2.0;
@@ -158,10 +160,10 @@ impl YoloV9App {
             if self.available_models.is_empty() {
                 self.available_models = get_embedded_model_list();
             }
-            if self.selected_model.is_empty() {
-                if let Some(first) = self.available_models.first() {
-                    self.selected_model = first.clone();
-                }
+            if self.selected_model.is_empty()
+                && let Some(first) = self.available_models.first()
+            {
+                self.selected_model = first.clone();
             }
 
             let mut selected = self.selected_model.clone();
@@ -252,13 +254,11 @@ impl YoloV9App {
                         egui::TextEdit::singleline(&mut confidence_text),
                     )
                     .changed()
+                    && let Ok(value) = confidence_text.parse::<f32>()
+                    && (0.1..=1.0).contains(&value)
                 {
-                    if let Ok(value) = confidence_text.parse::<f32>() {
-                        if value >= 0.1 && value <= 1.0 {
-                            self.confidence_threshold = value;
-                            self.update_selection_by_confidence();
-                        }
-                    }
+                    self.confidence_threshold = value;
+                    self.update_selection_by_confidence();
                 }
             });
 
@@ -289,13 +289,11 @@ impl YoloV9App {
                         egui::TextEdit::singleline(&mut nms_text),
                     )
                     .changed()
+                    && let Ok(value) = nms_text.parse::<f32>()
+                    && (0.05..=0.8).contains(&value)
                 {
-                    if let Ok(value) = nms_text.parse::<f32>() {
-                        if value >= 0.05 && value <= 0.8 {
-                            self.nms_threshold = value;
-                            self.reapply_nms_only();
-                        }
-                    }
+                    self.nms_threshold = value;
+                    self.reapply_nms_only();
                 }
             });
 
@@ -324,9 +322,12 @@ impl YoloV9App {
                 let mut log_zoom_value = log_zoom;
                 if ui
                     .add(
-                        egui::Slider::new(&mut log_zoom_value, CONFIG.ui.min_zoom_log..=CONFIG.ui.max_zoom_log)
-                            .text("Log Zoom")
-                            .fixed_decimals(2),
+                        egui::Slider::new(
+                            &mut log_zoom_value,
+                            CONFIG.ui.min_zoom_log..=CONFIG.ui.max_zoom_log,
+                        )
+                        .text("Log Zoom")
+                        .fixed_decimals(2),
                     )
                     .changed()
                 {
@@ -344,10 +345,10 @@ impl YoloV9App {
                     .changed()
                 {
                     let cleaned = zoom_text.trim_end_matches('x');
-                    if let Ok(v) = cleaned.parse::<f32>() {
-                        if (0.1..=20.0).contains(&v) {
-                            self.image_zoom = v;
-                        }
+                    if let Ok(v) = cleaned.parse::<f32>()
+                        && (0.1..=20.0).contains(&v)
+                    {
+                        self.image_zoom = v;
                     }
                 }
             });
@@ -374,7 +375,11 @@ impl YoloV9App {
                 ui.label("Zoom Info:");
                 ui.colored_label(
                     egui::Color32::from_rgb(150, 150, 255),
-                    format!("Current: {:.3}x (log: {:.3})", self.image_zoom, self.image_zoom.ln()),
+                    format!(
+                        "Current: {:.3}x (log: {:.3})",
+                        self.image_zoom,
+                        self.image_zoom.ln()
+                    ),
                 );
             });
 
@@ -384,12 +389,18 @@ impl YoloV9App {
             ui.label("Bounding Box Color Mapping:");
             ui.horizontal(|ui| {
                 ui.label("Color Mode:");
-                egui::ComboBox::from_id_source("color_mapping_mode")
+                egui::ComboBox::from_id_salt("color_mapping_mode")
                     .selected_text(match self.color_mapping_mode {
                         yolov9_onnx_test_lib::config::ColorMappingMode::Fixed => "Fixed (Red)",
-                        yolov9_onnx_test_lib::config::ColorMappingMode::RangeBased => "Range-Based (5 levels)",
-                        yolov9_onnx_test_lib::config::ColorMappingMode::Gradient => "Gradient (Linear)",
-                        yolov9_onnx_test_lib::config::ColorMappingMode::HsvBased => "HSV-Based (Smooth)",
+                        yolov9_onnx_test_lib::config::ColorMappingMode::RangeBased => {
+                            "Range-Based (5 levels)"
+                        }
+                        yolov9_onnx_test_lib::config::ColorMappingMode::Gradient => {
+                            "Gradient (Linear)"
+                        }
+                        yolov9_onnx_test_lib::config::ColorMappingMode::HsvBased => {
+                            "HSV-Based (Smooth)"
+                        }
                     })
                     .show_ui(ui, |ui| {
                         ui.selectable_value(
@@ -446,10 +457,9 @@ impl YoloV9App {
                 )
                 .clicked()
                 && !self.is_processing
+                && let Some(path) = &self.selected_image_path
             {
-                if let Some(path) = &self.selected_image_path {
-                    self.process_image_with_force(ui.ctx(), path.clone());
-                }
+                self.process_image_with_force(ui.ctx(), path.clone());
             }
         });
     }
@@ -698,7 +708,7 @@ impl YoloV9App {
                 // 우측(이미지 영역) 전체에서 휠 입력을 줌으로 처리 (자연로그 기반)
                 let pointer_in_area = ui
                     .input(|i| i.pointer.hover_pos())
-                    .map_or(false, |pos| ui.clip_rect().contains(pos));
+                    .is_some_and(|pos| ui.clip_rect().contains(pos));
                 if pointer_in_area {
                     let scroll_delta = ui.input(|i| i.smooth_scroll_delta).y;
                     if scroll_delta != 0.0 {
@@ -904,19 +914,17 @@ impl YoloV9App {
             ) {
                 Ok((pre_nms_detections, inference_time_ms)) => {
                     self.pre_nms_detections = pre_nms_detections;
-                    self.detections = apply_nms_only(
-                        self.pre_nms_detections.clone(),
-                        self.nms_threshold,
-                    );
+                    self.detections =
+                        apply_nms_only(self.pre_nms_detections.clone(), self.nms_threshold);
                     self.selection = vec![true; self.detections.len()];
                     self.update_selection_by_confidence();
-                    
+
                     if inference_time_ms > 0.0 {
                         self.inference_time_ms = Some(inference_time_ms);
                     } else {
                         self.inference_time_ms = None; // 캐시 사용 시 시간 표시 안함
                     }
-                    
+
                     // 텍스처 로딩
                     if let Ok(img) = image::load_from_memory(&image_data) {
                         self.load_texture(ctx, img.to_rgb8());
@@ -949,7 +957,7 @@ impl YoloV9App {
             self.selection.clear();
             return;
         }
-        
+
         // selection 벡터 크기 조정
         while self.selection.len() < self.detections.len() {
             self.selection.push(true);
@@ -957,7 +965,7 @@ impl YoloV9App {
         if self.selection.len() > self.detections.len() {
             self.selection.truncate(self.detections.len());
         }
-        
+
         // 신뢰도 임계값에 따라 선택 상태 업데이트
         for (i, detection) in self.detections.iter().enumerate() {
             if i < self.selection.len() {
@@ -972,35 +980,37 @@ impl YoloV9App {
             self.selection.clear();
             return;
         }
-        
-        self.detections = apply_nms_only(
-            self.pre_nms_detections.clone(),
-            self.nms_threshold,
-        );
-        
+
+        self.detections = apply_nms_only(self.pre_nms_detections.clone(), self.nms_threshold);
+
         // selection 벡터 크기 조정
         self.selection = vec![true; self.detections.len()];
         self.update_selection_by_confidence();
     }
 
     /// 텍스처 로딩
-    fn load_texture(&mut self, ctx: &egui::Context, result_image: image::RgbImage) {
+    fn load_texture(&mut self, _ctx: &egui::Context, result_image: image::RgbImage) {
         let mut buffer = Vec::new();
         if let Ok(()) = result_image.write_to(
             &mut std::io::Cursor::new(&mut buffer),
             image::ImageFormat::Png,
-        ) {
-            if let Ok(image) = image::load_from_memory(&buffer) {
-                let rgba = image.to_rgba8();
-                let size = [rgba.width() as _, rgba.height() as _];
+        ) && let Ok(image) = image::load_from_memory(&buffer)
+        {
+            let rgba = image.to_rgba8();
+            let size = rgba.dimensions();
+            self.image_size = egui::vec2(size.0 as f32, size.1 as f32);
 
-                // ColorImage 생성
-                let color_image = egui::ColorImage::from_rgba_unmultiplied(size, rgba.as_raw());
-
-                let texture = ctx.load_texture("processed_image", color_image, Default::default());
-                self.processed_image = Some(texture);
-                self.image_size = egui::vec2(size[0] as f32, size[1] as f32);
-            }
+            // 텍스처 생성 및 저장
+            let texture = _ctx.load_texture(
+                "processed_image",
+                egui::ColorImage::from_rgba_unmultiplied([
+                    size.0 as usize,
+                    size.1 as usize,
+                ],
+                &rgba),
+                egui::TextureOptions::default(),
+            );
+            self.processed_image = Some(texture);
         }
     }
 }

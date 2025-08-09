@@ -1,7 +1,7 @@
 use serde::{Deserialize, Serialize};
 
 /// 애플리케이션 설정 구조체
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
 pub struct AppConfig {
     /// 모델 관련 설정
     pub model: ModelConfig,
@@ -84,16 +84,7 @@ pub struct DatabaseConfig {
     pub cleanup_days: i32,
 }
 
-impl Default for AppConfig {
-    fn default() -> Self {
-        Self {
-            model: ModelConfig::default(),
-            inference: InferenceConfig::default(),
-            ui: UiConfig::default(),
-            database: DatabaseConfig::default(),
-        }
-    }
-}
+// AppConfig: Default는 파생(derive)로 대체됨 (필드들도 Default 구현 보유)
 
 impl Default for ModelConfig {
     fn default() -> Self {
@@ -128,7 +119,7 @@ impl Default for UiConfig {
             default_zoom: 1.0,
             default_confidence_threshold: 0.6,
             default_nms_threshold: 0.2,
-            bounding_box_color_mode: ColorMappingMode::Fixed,
+            bounding_box_color_mode: ColorMappingMode::HsvBased,
         }
     }
 }
