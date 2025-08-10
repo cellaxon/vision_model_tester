@@ -100,7 +100,7 @@ impl eframe::App for YoloV9App {
             .default_width(450.0)
             .width_range(450.0..=450.0)
             .show(ctx, |ui| {
-                self.render_header(ui);
+                self.render_header(ui, ctx);
                 self.render_settings_panel(ui);
                 self.render_error_message(ui);
                 self.render_detections_panel(ui);
@@ -150,7 +150,7 @@ impl YoloV9App {
     }
 
     /// 헤더 영역 렌더링
-    fn render_header(&mut self, ui: &mut egui::Ui) {
+    fn render_header(&mut self, ui: &mut egui::Ui, ctx: &egui::Context) {
         ui.heading("YOLOv9 Object Detection");
         ui.add_space(10.0);
 
@@ -176,7 +176,10 @@ impl YoloV9App {
                 });
             if selected != self.selected_model {
                 self.selected_model = selected;
-                // 모델이 바뀌면 다음 추론에서 로딩되도록 세션 유지 (get_session에서 교체)
+                // 모델이 바뀌면 현재 이미지가 있다면 즉시 재추론 실행
+                if let Some(image_path) = &self.selected_image_path {
+                    self.process_image(ctx, image_path.clone());
+                }
             }
 
             let (model_name, input_size) = get_model_info(&self.selected_model);
