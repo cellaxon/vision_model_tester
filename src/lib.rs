@@ -4,6 +4,8 @@ use imageproc::rect::Rect;
 use ndarray::CowArray;
 use ndarray::{ArrayD, IxDyn};
 use ort::execution_providers::CPUExecutionProviderOptions;
+#[cfg(target_os = "macos")]
+use ort::execution_providers::CoreMLExecutionProviderOptions;
 use ort::{Environment, ExecutionProvider, SessionBuilder, Value};
 use rusqlite::{Connection, params};
 use serde::{Deserialize, Serialize};
