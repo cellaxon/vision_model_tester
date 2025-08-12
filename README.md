@@ -101,8 +101,14 @@ assets/models/
 ```
 
 ### 모델 다운로드
-- YOLOv9 모델: [Hugging Face: Xenova/yolov9-onnx](https://huggingface.co/Xenova/yolov9-onnx/tree/main)
-- RF-DETR 모델: 프로젝트에 포함됨
+
+#### YOLOv9 모델
+- **출처**: [Hugging Face: Xenova/yolov9-onnx](https://huggingface.co/Xenova/yolov9-onnx/tree/main)
+- **설명**: COCO 80 클래스 객체 검출, 640×640 입력
+
+#### RF-DETR 모델  
+- **출처**: [Hugging Face RF-DETR ONNX 모델 페이지](https://huggingface.co/onnx-community/rfdetr_base-ONNX/tree/main/onnx)
+- **설명**: Transformer 기반 고정밀 검출, COCO 90 클래스, 560×560 입력
 
 ```bash
 # 1) 디렉토리 생성
@@ -115,9 +121,19 @@ curl -L -o assets/models/yolov9/yolov9-c.onnx https://huggingface.co/Xenova/yolo
 curl -L -o assets/models/yolov9/gelan-e.onnx https://huggingface.co/Xenova/yolov9-onnx/resolve/main/gelan-e.onnx
 curl -L -o assets/models/yolov9/yolov9-e.onnx https://huggingface.co/Xenova/yolov9-onnx/resolve/main/yolov9-e.onnx
 
-# 3) RF-DETR 모델 (이미 포함됨)
-# curl -L -o assets/models/rf-detr/rf-detr.onnx https://huggingface.co/han-cai/rf-detr/resolve/main/rf_detr.onnx
+# 3) RF-DETR 모델 다운로드
+curl -L -o assets/models/rf-detr/rf-detr.onnx https://huggingface.co/onnx-community/rfdetr_base-ONNX/resolve/main/onnx/model.onnx
 ```
+
+#### 모델 다운로드 방법
+1. **웹 브라우저**: 위 Hugging Face 링크에서 직접 다운로드
+2. **명령줄**: 위의 `curl` 명령어 사용
+3. **Git LFS**: Hugging Face 저장소를 클론하여 가져오기
+
+#### 참고사항
+- **RF-DETR 모델 크기**: 약 103MB
+- **YOLOv9 모델 크기**: 97MB (GELAN-C) ~ 265MB (YOLOv9-E)
+- **네트워크**: 다운로드 시 안정적인 인터넷 연결 필요
 
 > 빌드 시 해당 파일들이 존재해야 임베딩됩니다. 모델 파일명을 변경하지 말고 그대로 두는 것을 권장합니다.
 
@@ -309,7 +325,7 @@ flowchart TD
 
     Q --> R{DB 캐시 존재?}
     R -->|있음| S[Pre-NMS 결과 로드]
-    R -->|없음| T[모델 추론(Pre-NMS 저장)]
+    R -->|없음| T[모델 추론 Pre-NMS 저장]
 
     S --> U[NMS 적용]
     T --> U[NMS 적용]
@@ -334,7 +350,7 @@ flowchart LR
 ### 추론 및 후처리 파이프라인
 ```mermaid
 flowchart LR
-    A[ONNX 입력] --> B[YOLOv9/GELAN 추론]
+    A[ONNX 입력] --> B[YOLOv9 GELAN 추론]
     B --> C[출력 텐서 파싱]
     C --> D[신뢰도 필터링]
     D --> E[NMS 적용]
