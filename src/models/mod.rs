@@ -63,6 +63,62 @@ impl ModelType {
             ModelType::RfDetr => 560,
         }
     }
+
+    /// 클래스 개수 반환
+    pub fn class_count(&self) -> u32 {
+        match self {
+            ModelType::YoloV9(_) => 80, // COCO 80 classes
+            ModelType::RfDetr => 90,    // COCO 90 classes (background 제외)
+        }
+    }
+
+    /// NMS 지원 여부
+    pub fn supports_nms(&self) -> bool {
+        match self {
+            ModelType::YoloV9(_) => true,
+            ModelType::RfDetr => true, // RF-DETR도 NMS 지원
+        }
+    }
+
+    /// 실시간 NMS 임계값 조정 지원 여부
+    pub fn supports_realtime_nms_adjustment(&self) -> bool {
+        match self {
+            ModelType::YoloV9(_) => true,  // Pre-NMS 데이터 캐싱으로 지원
+            ModelType::RfDetr => false,    // 현재 구현에서는 미지원
+        }
+    }
+
+    /// 색상 매핑 지원 여부
+    pub fn supports_color_mapping(&self) -> bool {
+        match self {
+            ModelType::YoloV9(_) => true,
+            ModelType::RfDetr => true,
+        }
+    }
+
+    /// 모델별 권장 신뢰도 임계값 반환
+    pub fn default_confidence_threshold(&self) -> f32 {
+        match self {
+            ModelType::YoloV9(_) => 0.6,
+            ModelType::RfDetr => 0.5,
+        }
+    }
+
+    /// 모델별 권장 NMS 임계값 반환
+    pub fn default_nms_threshold(&self) -> f32 {
+        match self {
+            ModelType::YoloV9(_) => 0.2,
+            ModelType::RfDetr => 0.2,
+        }
+    }
+
+    /// 배치 처리 지원 여부
+    pub fn supports_batch_processing(&self) -> bool {
+        match self {
+            ModelType::YoloV9(_) => false,
+            ModelType::RfDetr => false,
+        }
+    }
 }
 
 /// 객체 검출기 공통 인터페이스
@@ -163,6 +219,29 @@ impl UnifiedInferenceEngine {
         }
     }
 
+    /// 현재 모델로 객체 검출 수행 (NMS 적용 전 원시 결과)
+    pub fn detect_pre_nms(&mut self, image_data: &[u8]) -> AppResult<DetectionResult> {
+        match &self.current_model {
+            ModelType::YoloV9(model_file) => {
+                if let Some(cache) = &mut self.yolov9_cache {
+                    yolov9::detect_objects_with_cache_pre_nms(image_data, cache, model_file)
+                        .map_err(|e| crate::error::AppError::InferenceError(e.to_string()))
+                } else {
+                    Err(crate::error::AppError::ModelError("YOLOv9 캐시가 초기화되지 않았습니다".to_string()))
+                }
+            }
+            ModelType::RfDetr => {
+                // RF-DETR의 경우 기존 방식 사용 (실시간 NMS 조정 미지원)
+                if let Some(cache) = &mut self.rf_detr_cache {
+                    rf_detr::detect_objects_with_cache(image_data, cache)
+                        .map_err(|e| crate::error::AppError::InferenceError(e.to_string()))
+                } else {
+                    Err(crate::error::AppError::ModelError("RF-DETR 캐시가 초기화되지 않았습니다".to_string()))
+                }
+            }
+        }
+    }
+
     /// 현재 모델 정보 반환
     pub fn get_current_model_info(&self) -> ModelInfo {
         match &self.current_model {
@@ -190,14 +269,28 @@ impl UnifiedInferenceEngine {
     pub fn get_available_models() -> Vec<ModelType> {
         let mut models = Vec::new();
         
-        // YOLOv9 모델들
+        // YOLOv9 모델들 (yolov9/ 하위 폴더에서 검색)
         for model_file in yolov9::get_embedded_model_list() {
             models.push(ModelType::YoloV9(model_file));
         }
         
-        // RF-DETR 모델
+        // RF-DETR 모델들 (rf-detr/ 하위 폴더에서 검색)
         models.push(ModelType::RfDetr);
         
         models
+    }
+    
+    /// 모델 타입별 사용 가능한 모델 목록 반환
+    pub fn get_models_by_type(model_type: &str) -> Vec<ModelType> {
+        match model_type {
+            "yolov9" => {
+                yolov9::get_embedded_model_list()
+                    .into_iter()
+                    .map(ModelType::YoloV9)
+                    .collect()
+            }
+            "rf_detr" => vec![ModelType::RfDetr],
+            _ => vec![],
+        }
     }
 } 

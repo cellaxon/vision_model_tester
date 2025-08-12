@@ -1,6 +1,6 @@
-# YOLOv9 & RF-DETR Unified Object Detection Application
+# Vision Model Tester
 
-YOLOv9와 RF-DETR 모델을 통합한 객체 검출 애플리케이션입니다. ONNX Runtime을 통해 추론을 수행하며, egui 기반의 GUI 인터페이스를 제공합니다.
+다양한 컴퓨터 비전 모델을 테스트할 수 있는 통합 애플리케이션입니다. 현재 YOLOv9와 RF-DETR 모델을 지원하며, ONNX Runtime을 통해 추론을 수행하고 egui 기반의 직관적인 GUI 인터페이스를 제공합니다.
 
 ## 🚀 주요 기능
 
@@ -87,23 +87,36 @@ yolov9_onnx_test/
 - Rust 1.70+
 - Windows/macOS/Linux
 
+### 모델 디렉토리 구조
+모델들을 타입별로 하위 폴더에 구성합니다:
+```
+assets/models/
+├── yolov9/
+│   ├── gelan-c.onnx      # YOLOv9 GELAN-C
+│   ├── gelan-e.onnx      # YOLOv9 GELAN-E
+│   ├── yolov9-c.onnx     # YOLOv9-C
+│   └── yolov9-e.onnx     # YOLOv9-E
+└── rf-detr/
+    └── rf-detr.onnx      # RF-DETR
+```
+
 ### 모델 다운로드
-- 지원 모델: `gelan-c.onnx`, `gelan-e.onnx`, `yolov9-c.onnx`, `yolov9-e.onnx`
-- 다운로드 위치: [Hugging Face: Xenova/yolov9-onnx](https://huggingface.co/Xenova/yolov9-onnx/tree/main)
+- YOLOv9 모델: [Hugging Face: Xenova/yolov9-onnx](https://huggingface.co/Xenova/yolov9-onnx/tree/main)
+- RF-DETR 모델: 프로젝트에 포함됨
 
 ```bash
 # 1) 디렉토리 생성
-mkdir -p assets/models
+mkdir -p assets/models/yolov9 assets/models/rf-detr
 
-# 2) 모델 다운로드 (예시)
-# YOLOv9 모델들
-curl -L -o assets/models/gelan-c.onnx https://huggingface.co/Xenova/yolov9-onnx/resolve/main/gelan-c.onnx
-curl -L -o assets/models/yolov9-c.onnx https://huggingface.co/Xenova/yolov9-onnx/resolve/main/yolov9-c.onnx
+# 2) YOLOv9 모델 다운로드
+curl -L -o assets/models/yolov9/gelan-c.onnx https://huggingface.co/Xenova/yolov9-onnx/resolve/main/gelan-c.onnx
+curl -L -o assets/models/yolov9/yolov9-c.onnx https://huggingface.co/Xenova/yolov9-onnx/resolve/main/yolov9-c.onnx
 # 선택적으로 추가 다운로드
-curl -L -o assets/models/gelan-e.onnx https://huggingface.co/Xenova/yolov9-onnx/resolve/main/gelan-e.onnx
-curl -L -o assets/models/yolov9-e.onnx https://huggingface.co/Xenova/yolov9-onnx/resolve/main/yolov9-e.onnx
-# RF-DETR 모델 (이미 복사됨)
-# curl -L -o assets/models/rf_detr_model.onnx https://huggingface.co/han-cai/rf-detr/resolve/main/rf_detr.onnx
+curl -L -o assets/models/yolov9/gelan-e.onnx https://huggingface.co/Xenova/yolov9-onnx/resolve/main/gelan-e.onnx
+curl -L -o assets/models/yolov9/yolov9-e.onnx https://huggingface.co/Xenova/yolov9-onnx/resolve/main/yolov9-e.onnx
+
+# 3) RF-DETR 모델 (이미 포함됨)
+# curl -L -o assets/models/rf-detr/rf-detr.onnx https://huggingface.co/han-cai/rf-detr/resolve/main/rf_detr.onnx
 ```
 
 > 빌드 시 해당 파일들이 존재해야 임베딩됩니다. 모델 파일명을 변경하지 말고 그대로 두는 것을 권장합니다.

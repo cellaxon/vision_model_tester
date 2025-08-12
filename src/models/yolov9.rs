@@ -14,7 +14,7 @@ use crate::error::{AppError, AppResult};
 use crate::utils::{color_utils, fs_utils, math_utils};
 
 // 기존 상수들을 설정에서 가져오기
-use crate::config::CONFIG;
+
 
 // 상수 정의 (기존 호환성을 위해 유지)
 const MODEL_INPUT_SIZE: u32 = 640;
@@ -225,63 +225,248 @@ pub fn preprocess_image(image: &RgbImage) -> anyhow::Result<ArrayD<f32>> {
 /// YOLOv9 모델 출력 파싱
 pub fn parse_yolov9_outputs(
     output_tensor: &ndarray::ArrayViewD<f32>,
-    _original_width: u32,
-    _original_height: u32,
+    original_width: u32,
+    original_height: u32,
     confidence_threshold: f32,
+    nms_threshold: f32,
 ) -> anyhow::Result<Vec<Detection>> {
+    let mut detections = Vec::new();
+    
+    // 출력 텐서 형태 확인
     let shape = output_tensor.shape();
-    if shape.len() != 3 || shape[0] != 1 {
-        return Err(anyhow::anyhow!("Invalid output tensor shape: {:?}", shape));
+    println!("🔍 Output tensor shape: {:?}", shape);
+    
+    if shape.len() != 3 {
+        return Err(anyhow::anyhow!("Invalid output tensor shape: expected 3 dimensions"));
+    }
+    
+    // 다양한 YOLOv9 출력 형태 지원
+    let (num_boxes, num_classes) = match shape[1] {
+        84 | 85 => (shape[2], 80),
+        _ => {
+            println!("⚠️ Unexpected shape: {:?}, trying alternative parsing", shape);
+            (shape[2], shape[1] - 4)
+        }
+    };
+
+    println!("📊 Parsing {} boxes with {} classes", num_boxes, num_classes);
+
+    // 출력 데이터를 (84, 8400) 형태로 변환
+    let output_data = output_tensor.to_owned();
+
+    // 바운딩 박스와 클래스 점수 분리
+    let boxes = output_data.slice(ndarray::s![0, 0..4, ..]); // (4, N): x, y, w, h
+    let scores = output_data.slice(ndarray::s![0, 4.., ..]); // (80, N): class scores
+
+    // 디버깅: 첫 번째 박스의 값들 확인
+    if num_boxes > 0 {
+        let first_box = boxes.slice(ndarray::s![.., 0]);
+        let first_scores = scores.slice(ndarray::s![.., 0]);
+        println!("🔍 First box: {:?}", first_box.to_vec());
+        println!("🔍 First scores (first 10): {:?}", first_scores.slice(ndarray::s![..10]).to_vec());
     }
 
-    let num_classes = shape[1] - 4; // 4 (bbox) + num_classes
-    let num_anchors = shape[2];
-
-    let mut detections = Vec::new();
-
-    for anchor in 0..num_anchors {
-        // 바운딩 박스 좌표 추출 (center_x, center_y, width, height)
-        let center_x = output_tensor[[0, 0, anchor]];
-        let center_y = output_tensor[[0, 1, anchor]];
-        let width = output_tensor[[0, 2, anchor]];
-        let height = output_tensor[[0, 3, anchor]];
-
-        // 클래스 확률 계산
+    for box_idx in 0..num_boxes {
+        // 바운딩 박스 좌표 (center_x, center_y, width, height) - 픽셀 좌표로 출력됨
+        // 배열 경계 검사 추가
+        if box_idx >= boxes.shape()[1] {
+            continue;
+        }
+        
+        let cx = boxes[[0, box_idx]];
+        let cy = boxes[[1, box_idx]];
+        let w = boxes[[2, box_idx]];
+        let h = boxes[[3, box_idx]];
+        
+        // 픽셀 좌표를 정규화된 좌표로 변환 (640x640 기준)
+        let cx_norm = cx / MODEL_INPUT_SIZE as f32;
+        let cy_norm = cy / MODEL_INPUT_SIZE as f32;
+        let w_norm = w / MODEL_INPUT_SIZE as f32;
+        let h_norm = h / MODEL_INPUT_SIZE as f32;
+        
+        // 더 엄격한 바운딩 박스 검증 (정규화된 좌표 기준)
+        if w_norm <= 0.0 || h_norm <= 0.0 || w_norm > 1.0 || h_norm > 1.0 {
+            continue;
+        }
+        
+        // center 좌표가 이미지 범위 내에 있는지 확인
+        if !(0.0..=1.0).contains(&cx_norm) || !(0.0..=1.0).contains(&cy_norm) {
+            continue;
+        }
+        
+        // 클래스 확률 계산 (시그모이드 적용)
         let mut max_conf = 0.0;
         let mut best_class = 0;
-
-        for class_id in 0..num_classes {
-            let logit = output_tensor[[0, 4 + class_id, anchor]];
-            let conf = math_utils::sigmoid(logit);
+        
+        for class_idx in 0..num_classes {
+            // 배열 경계 검사 추가
+            if class_idx >= scores.shape()[0] || box_idx >= scores.shape()[1] {
+                continue;
+            }
+            
+            let raw_score = scores[[class_idx, box_idx]];
+            // 점수 스케일링 (매우 작은 값들을 확대)
+            let scaled_score = raw_score * 1000.0; // 스케일링 팩터
+            let conf = math_utils::sigmoid(scaled_score); // 시그모이드 적용
+            
             if conf > max_conf {
                 max_conf = conf;
-                best_class = class_id;
+                best_class = class_idx;
             }
         }
-
-        // 신뢰도 임계값 확인
+        
+        // 신뢰도 임계값 확인 (GUI에서 설정한 값 사용)
         if max_conf > confidence_threshold {
-            // 바운딩 박스 좌표를 [x1, y1, x2, y2] 형태로 변환
-            let x1 = (center_x - width / 2.0).max(0.0).min(1.0);
-            let y1 = (center_y - height / 2.0).max(0.0).min(1.0);
-            let x2 = (center_x + width / 2.0).max(0.0).min(1.0);
-            let y2 = (center_y + height / 2.0).max(0.0).min(1.0);
+            // 정규화된 좌표로 center_x, center_y, width, height -> x1, y1, x2, y2 변환
+            let x1 = (cx_norm - w_norm / 2.0).clamp(0.0, 1.0);
+            let y1 = (cy_norm - h_norm / 2.0).clamp(0.0, 1.0);
+            let x2 = (cx_norm + w_norm / 2.0).clamp(0.0, 1.0);
+            let y2 = (cy_norm + h_norm / 2.0).clamp(0.0, 1.0);
+            
+            // 더 엄격한 바운딩 박스 유효성 검증  
+            if x1 >= x2 || y1 >= y2 || 
+               (x2 - x1) < 0.02 || (y2 - y1) < 0.02 ||  // 최소 크기 증가
+               (x2 - x1) > 0.95 || (y2 - y1) > 0.95
+            {
+                // 최대 크기 제한 (전체 이미지 제외)
+                continue;
+            }
+            
+            // 레터박싱 좌표를 원본 이미지 좌표로 변환
+            let original_bbox = letterbox_to_original_coords([x1, y1, x2, y2], original_width, original_height);
+            
+            // 변환된 좌표 유효성 검증
+            let [ox1, oy1, ox2, oy2] = original_bbox;
+            if ox1 >= ox2 || oy1 >= oy2 || 
+               (ox2 - ox1) < 0.02 || (oy2 - oy1) < 0.02 ||
+               (ox2 - ox1) > 0.95 || (oy2 - oy1) > 0.95 {
+                continue;
+            }
+            
+            if let Some(class_name) = yolov9_id_to_label(best_class as u32) {
+                // 디버깅: 높은 신뢰도 검출만 출력
+                if max_conf > 0.7 {
+                    println!("🎯 High confidence detection: {} ({}%) at [{:.3}, {:.3}, {:.3}, {:.3}]", 
+                             class_name, (max_conf * 100.0) as i32, ox1, oy1, ox2, oy2);
+                }
+                
+                detections.push(Detection {
+                    bbox: original_bbox,
+                    confidence: max_conf,
+                    class_id: best_class as u32,
+                    class_name: class_name.to_string(),
+                });
+            }
+        }
+    }
+    
+    // NMS 적용 (GUI에서 설정한 임계값 사용)
+    non_maximum_suppression(&mut detections, nms_threshold);
 
-            // 유효한 바운딩 박스인지 확인
-            if x2 > x1 && y2 > y1 {
-                if let Some(class_name) = yolov9_id_to_label(best_class as u32) {
-                    detections.push(Detection {
-                        bbox: [x1, y1, x2, y2],
-                        confidence: max_conf,
-                        class_id: best_class as u32,
-                        class_name: class_name.to_string(),
-                    });
+    Ok(detections)
+}
+
+/// 레터박싱 좌표를 원본 이미지 좌표로 변환
+fn letterbox_to_original_coords(
+    bbox: [f32; 4], // [x1, y1, x2, y2] in letterboxed coordinates (0-1)
+    original_width: u32,
+    original_height: u32,
+) -> [f32; 4] {
+    let aspect_ratio = original_width as f32 / original_height as f32;
+
+    let (scale, offset_x, offset_y) = if aspect_ratio > 1.0 {
+        // 가로가 더 긴 경우
+        let scale = MODEL_INPUT_SIZE as f32 / original_width as f32;
+        let offset_x = 0.0;
+        let offset_y = (MODEL_INPUT_SIZE as f32 - MODEL_INPUT_SIZE as f32 / aspect_ratio) / 2.0;
+        (scale, offset_x, offset_y)
+    } else {
+        // 세로가 더 긴 경우
+        let scale = MODEL_INPUT_SIZE as f32 / original_height as f32;
+        let offset_x = (MODEL_INPUT_SIZE as f32 - MODEL_INPUT_SIZE as f32 * aspect_ratio) / 2.0;
+        let offset_y = 0.0;
+        (scale, offset_x, offset_y)
+    };
+
+    // 레터박싱 좌표를 픽셀 좌표로 변환
+    let x1_pixel = bbox[0] * MODEL_INPUT_SIZE as f32;
+    let y1_pixel = bbox[1] * MODEL_INPUT_SIZE as f32;
+    let x2_pixel = bbox[2] * MODEL_INPUT_SIZE as f32;
+    let y2_pixel = bbox[3] * MODEL_INPUT_SIZE as f32;
+
+    // 패딩 제거
+    let x1_unpadded = (x1_pixel - offset_x) / scale;
+    let y1_unpadded = (y1_pixel - offset_y) / scale;
+    let x2_unpadded = (x2_pixel - offset_x) / scale;
+    let y2_unpadded = (y2_pixel - offset_y) / scale;
+
+    // 원본 이미지 범위로 클리핑
+    let x1_final = x1_unpadded.max(0.0).min(original_width as f32);
+    let y1_final = y1_unpadded.max(0.0).min(original_height as f32);
+    let x2_final = x2_unpadded.max(0.0).min(original_width as f32);
+    let y2_final = y2_unpadded.max(0.0).min(original_height as f32);
+
+    // 정규화된 좌표로 변환 (0-1)
+    [
+        x1_final / original_width as f32,
+        y1_final / original_height as f32,
+        x2_final / original_width as f32,
+        y2_final / original_height as f32,
+    ]
+}
+
+/// Non-Maximum Suppression (NMS) 구현 (기존 lib.rs와 동일)
+fn non_maximum_suppression(detections: &mut Vec<Detection>, nms_threshold: f32) {
+    if detections.is_empty() {
+        return;
+    }
+
+    // 신뢰도 기준으로 정렬 (높은 신뢰도가 먼저) - 패닉 방지
+    detections.sort_by(|a, b| {
+        b.confidence
+            .partial_cmp(&a.confidence)
+            .unwrap_or(std::cmp::Ordering::Equal)
+    });
+
+    let mut keep = Vec::new();
+    let mut suppressed = vec![false; detections.len()];
+
+    for i in 0..detections.len() {
+        if suppressed[i] {
+            continue;
+        }
+
+        keep.push(i);
+
+        for j in (i + 1)..detections.len() {
+            if suppressed[j] {
+                continue;
+            }
+
+            // 같은 클래스인 경우에만 NMS 적용
+            if detections[i].class_id == detections[j].class_id {
+                let iou = math_utils::calculate_iou(&detections[i].bbox, &detections[j].bbox);
+                if iou > nms_threshold {
+                    suppressed[j] = true;
                 }
             }
         }
     }
 
-    Ok(detections)
+    // 유지할 검출 결과만 남기기
+    let mut new_detections = Vec::new();
+    for &idx in &keep {
+        if idx < detections.len() {
+            new_detections.push(detections[idx].clone());
+        }
+    }
+
+    *detections = new_detections;
+
+    // 최대 검출 개수 제한 (성능 향상)
+    if detections.len() > 50 {
+        detections.truncate(50);
+    }
 }
 
 /// 검출된 객체에 바운딩 박스 그리기
@@ -636,16 +821,12 @@ pub fn detect_objects_with_cache(
         let output_tensor = output.try_extract::<f32>()?;
         let output_view = output_tensor.view();
 
-        // YOLOv9 출력 파싱
-        detections = parse_yolov9_outputs(&output_view, img.width(), img.height(), CONFIDENCE_THRESHOLD)?;
-
-        // NMS 적용으로 중복 박스 억제
-        apply_nms(&mut detections, NMS_THRESHOLD);
+        // YOLOv9 출력 파싱 (기본 임계값 사용)
+        detections = parse_yolov9_outputs(&output_view, img.width(), img.height(), CONFIDENCE_THRESHOLD, NMS_THRESHOLD)?;
     }
 
-    // 바운딩 박스가 포함된 이미지 생성
-    let mut result_image = img.clone();
-    draw_detections(&mut result_image, &detections, &CONFIG.ui.bounding_box_color_mode);
+    // 원본 이미지 그대로 반환 (GUI에서 박스 그리기 처리)
+    let result_image = img.clone();
 
     let result = crate::models::DetectionResult {
         detections,
@@ -656,51 +837,170 @@ pub fn detect_objects_with_cache(
     Ok(result)
 }
 
+/// 메인 객체 검출 함수 (NMS 적용 전 원시 결과 반환)
+pub fn detect_objects_with_cache_pre_nms(
+    image_data: &[u8], 
+    cache: &mut ModelCache,
+    model_file: &str,
+) -> anyhow::Result<crate::models::DetectionResult> {
+    // 이미지 로드
+    let img = ImageReader::new(std::io::Cursor::new(image_data))
+        .with_guessed_format()?
+        .decode()?
+        .to_rgb8();
+
+    // 캐시된 세션 가져오기
+    let session = cache.get_session(model_file)?;
+
+    // 이미지 전처리
+    let input_array = preprocess_image(&img)?;
+    let cow_array = CowArray::from(&input_array);
+    let input_value = Value::from_array(session.allocator(), &cow_array)?;
+
+    // 추론 시간 측정 시작
+    let start_time = std::time::Instant::now();
+
+    // 추론 실행
+    let outputs = session.run(vec![input_value])?;
+
+    // 추론 시간 측정 종료
+    let inference_time = start_time.elapsed();
+    let inference_time_ms = inference_time.as_secs_f64() * 1000.0;
+
+    // 결과 파싱 (NMS 적용 안 함)
+    let mut detections = Vec::new();
+    if let Some(output) = outputs.first() {
+        let output_tensor = output.try_extract::<f32>()?;
+        let output_view = output_tensor.view();
+
+        // YOLOv9 출력 파싱 (매우 낮은 임계값으로 모든 후보 추출)
+        detections = parse_yolov9_outputs_no_nms(&output_view, img.width(), img.height(), 0.1)?;
+    }
+
+    // 원본 이미지 그대로 반환 (GUI에서 박스 그리기 처리)
+    let result_image = img.clone();
+
+    let result = crate::models::DetectionResult {
+        detections,
+        result_image,
+        inference_time_ms,
+    };
+
+    Ok(result)
+}
+
+/// YOLOv9 모델 출력 파싱 (NMS 적용 안 함)
+fn parse_yolov9_outputs_no_nms(
+    output_tensor: &ndarray::ArrayViewD<f32>,
+    original_width: u32,
+    original_height: u32,
+    confidence_threshold: f32,
+) -> anyhow::Result<Vec<Detection>> {
+    let mut detections = Vec::new();
+    
+    // 출력 텐서 형태 확인
+    let shape = output_tensor.shape();
+    
+    if shape.len() != 3 {
+        return Err(anyhow::anyhow!("Invalid output tensor shape: expected 3 dimensions"));
+    }
+    
+    // 다양한 YOLOv9 출력 형태 지원
+    let (num_boxes, num_classes) = match shape[1] {
+        84 | 85 => (shape[2], 80),
+        _ => (shape[2], shape[1] - 4)
+    };
+
+    // 출력 데이터를 (84, 8400) 형태로 변환
+    let output_data = output_tensor.to_owned();
+
+    // 바운딩 박스와 클래스 점수 분리
+    let boxes = output_data.slice(ndarray::s![0, 0..4, ..]); // (4, N): x, y, w, h
+    let scores = output_data.slice(ndarray::s![0, 4.., ..]); // (80, N): class scores
+
+    for box_idx in 0..num_boxes {
+        // 배열 경계 검사 추가
+        if box_idx >= boxes.shape()[1] {
+            continue;
+        }
+
+        let cx = boxes[[0, box_idx]];
+        let cy = boxes[[1, box_idx]];
+        let w = boxes[[2, box_idx]];
+        let h = boxes[[3, box_idx]];
+
+        // 픽셀 좌표를 정규화된 좌표로 변환 (640x640 기준)
+        let cx_norm = cx / MODEL_INPUT_SIZE as f32;
+        let cy_norm = cy / MODEL_INPUT_SIZE as f32;
+        let w_norm = w / MODEL_INPUT_SIZE as f32;
+        let h_norm = h / MODEL_INPUT_SIZE as f32;
+
+        // 기본적인 바운딩 박스 검증
+        if w_norm <= 0.0 || h_norm <= 0.0 || w_norm > 1.0 || h_norm > 1.0 {
+            continue;
+        }
+
+        // center 좌표가 이미지 범위 내에 있는지 확인
+        if !(0.0..=1.0).contains(&cx_norm) || !(0.0..=1.0).contains(&cy_norm) {
+            continue;
+        }
+
+        // 클래스 확률 계산 (시그모이드 적용)
+        let mut max_conf = 0.0;
+        let mut best_class = 0;
+
+        for class_idx in 0..num_classes {
+            // 배열 경계 검사 추가
+            if class_idx >= scores.shape()[0] || box_idx >= scores.shape()[1] {
+                continue;
+            }
+
+            let raw_score = scores[[class_idx, box_idx]];
+            // 점수 스케일링 (매우 작은 값들을 확대)
+            let scaled_score = raw_score * 1000.0; // 스케일링 팩터
+            let conf = math_utils::sigmoid(scaled_score); // 시그모이드 적용
+
+            if conf > max_conf {
+                max_conf = conf;
+                best_class = class_idx;
+            }
+        }
+
+        // 신뢰도 임계값 확인 (매우 낮은 임계값)
+        if max_conf > confidence_threshold {
+            // 정규화된 좌표로 center_x, center_y, width, height -> x1, y1, x2, y2 변환
+            let x1 = (cx_norm - w_norm / 2.0).clamp(0.0, 1.0);
+            let y1 = (cy_norm - h_norm / 2.0).clamp(0.0, 1.0);
+            let x2 = (cx_norm + w_norm / 2.0).clamp(0.0, 1.0);
+            let y2 = (cy_norm + h_norm / 2.0).clamp(0.0, 1.0);
+
+            // 기본적인 바운딩 박스 유효성 검증
+            if x1 >= x2 || y1 >= y2 || (x2 - x1) < 0.01 || (y2 - y1) < 0.01 {
+                continue;
+            }
+
+            // 레터박싱 좌표를 원본 이미지 좌표로 변환
+            let original_bbox = letterbox_to_original_coords([x1, y1, x2, y2], original_width, original_height);
+
+            if let Some(class_name) = yolov9_id_to_label(best_class as u32) {
+                detections.push(Detection {
+                    bbox: original_bbox,
+                    confidence: max_conf,
+                    class_id: best_class as u32,
+                    class_name: class_name.to_string(),
+                });
+            }
+        }
+    }
+
+    Ok(detections)
+}
+
 /// 메인 객체 검출 함수 (기본 모델 사용)
 pub fn detect_objects(image_data: &[u8]) -> anyhow::Result<crate::models::DetectionResult> {
     // ModelCache를 생성하여 사용
     let mut cache = ModelCache::new()?;
     detect_objects_with_cache(image_data, &mut cache, "gelan-e.onnx")
-}
-
-/// Non-Maximum Suppression (클래스별 NMS)
-fn apply_nms(detections: &mut Vec<Detection>, nms_threshold: f32) {
-    if detections.is_empty() {
-        return;
-    }
-
-    // 신뢰도 기준으로 정렬 (높은 신뢰도 우선)
-    detections.sort_by(|a, b| {
-        b.confidence
-            .partial_cmp(&a.confidence)
-            .unwrap_or(std::cmp::Ordering::Equal)
-    });
-
-    let mut kept: Vec<Detection> = Vec::with_capacity(detections.len());
-
-    for det in detections.iter() {
-        // 동일 클래스에 대해서만 NMS 비교
-        let mut should_keep = true;
-        for kept_det in kept.iter() {
-            if det.class_id == kept_det.class_id {
-                let iou = math_utils::calculate_iou(&det.bbox, &kept_det.bbox);
-                if iou > nms_threshold {
-                    should_keep = false;
-                    break;
-                }
-            }
-        }
-        if should_keep {
-            kept.push(det.clone());
-        }
-    }
-
-    // 너무 많은 박스는 제한 (성능/가독성)
-    if kept.len() > 100 {
-        kept.truncate(100);
-    }
-
-    *detections = kept;
 }
 
 /// YOLOv9 전용 객체 검출기 구현
@@ -729,8 +1029,8 @@ pub use embedded_models::{get_embedded_model_list, get_embedded_model_bytes};
 mod embedded_models {
     use include_dir::{Dir, include_dir};
 
-    // 임베디드 리소스: assets/models 폴더의 모든 onnx 파일을 임베딩
-    static ASSETS_MODELS_DIR: Dir = include_dir!("$CARGO_MANIFEST_DIR/assets/models");
+    // 임베디드 리소스: assets/models/yolov9 폴더의 모든 onnx 파일을 임베딩
+    static ASSETS_MODELS_DIR: Dir = include_dir!("$CARGO_MANIFEST_DIR/assets/models/yolov9");
 
     /// 임베디드된 모델 파일(.onnx) 목록 반환
     pub fn get_embedded_model_list() -> Vec<String> {

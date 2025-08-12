@@ -3,6 +3,7 @@ pub mod config;
 pub mod error;
 pub mod utils;
 pub mod models;
+pub mod database;
 
 // 공통 구조체들을 models 모듈에서 가져오기
 use models::{DetectionResult, ModelType, UnifiedInferenceEngine};
@@ -13,6 +14,9 @@ pub use models::yolov9::Detection;
 // 기존 호환성을 위한 재export
 pub use models::yolov9::{get_embedded_model_list, get_model_info, ModelCache, InferenceDb};
 pub use models::rf_detr::RfDetrDetector;
+
+// 새로운 데이터베이스 시스템
+pub use database::EnhancedInferenceDb;
 
 use std::sync::{Mutex, OnceLock};
 

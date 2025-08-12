@@ -9,6 +9,18 @@ use vision_model_tester_lib::{
 // 설정에서 줌 관련 상수 가져오기
 use vision_model_tester_lib::config::CONFIG;
 
+// UI 컴포넌트 크기 상수
+const BUTTON_HEIGHT: f32 = 32.0;
+const BUTTON_WIDTH_LARGE: f32 = 200.0;
+
+const BUTTON_WIDTH_SMALL: f32 = 80.0;
+const TEXT_INPUT_WIDTH: f32 = 70.0;
+const TEXT_INPUT_HEIGHT: f32 = 24.0;
+const SLIDER_WIDTH: f32 = 180.0;
+const COMBO_BOX_WIDTH: f32 = 160.0;
+const SPACING_SMALL: f32 = 5.0;
+const SPACING_MEDIUM: f32 = 10.0;
+
 /// GUI 애플리케이션 실행
 pub fn run_gui() {
     let options = eframe::NativeOptions {
@@ -17,7 +29,7 @@ pub fn run_gui() {
     };
 
     if let Err(e) = eframe::run_native(
-        "YOLOv9 & RF-DETR Object Detection",
+        "Vision Model Tester",
         options,
         Box::new(|_cc| Ok(Box::new(UnifiedDetectionApp::default()))),
     ) {
@@ -155,8 +167,8 @@ impl UnifiedDetectionApp {
 
     /// 헤더 영역 렌더링
     fn render_header(&mut self, ui: &mut egui::Ui, ctx: &egui::Context) {
-        ui.heading("YOLOv9 & RF-DETR Object Detection");
-        ui.add_space(10.0);
+        ui.heading("Vision Model Tester");
+        ui.add_space(SPACING_MEDIUM);
 
         // 모델 정보 표시
         if self.available_models.is_empty() {
@@ -167,8 +179,13 @@ impl UnifiedDetectionApp {
         let available_models = &self.available_models;
         
         ui.horizontal(|ui| {
-            ui.label("Model:");
+            ui.add_sized(
+                egui::vec2(60.0, BUTTON_HEIGHT),
+                egui::Label::new("Model:")
+            );
+            
             egui::ComboBox::from_id_salt("model_combo")
+                .width(COMBO_BOX_WIDTH)
                 .selected_text(&selected.display_name())
                 .show_ui(ui, |ui| {
                     for m in available_models {
@@ -178,7 +195,18 @@ impl UnifiedDetectionApp {
         });
         
         if selected != self.selected_model {
+            let previous_model = self.selected_model.clone();
             self.selected_model = selected;
+            
+            // 모델별 권장 설정값 적용 (사용자가 기본값을 사용 중인 경우만)
+            if self.confidence_threshold == previous_model.default_confidence_threshold() {
+                self.confidence_threshold = self.selected_model.default_confidence_threshold();
+                self.update_selection_by_confidence();
+            }
+            if self.nms_threshold == previous_model.default_nms_threshold() {
+                self.nms_threshold = self.selected_model.default_nms_threshold();
+            }
+            
             // 모델이 바뀌면 추론 엔진 재초기화
             if let Some(engine) = &mut self.inference_engine {
                 if let Err(e) = engine.set_model(self.selected_model.clone()) {
@@ -202,7 +230,7 @@ impl UnifiedDetectionApp {
         ui.vertical(|ui| {
             if ui
                 .add_sized(
-                    egui::vec2(380.0, 40.0),
+                    egui::vec2(BUTTON_WIDTH_LARGE, BUTTON_HEIGHT),
                     egui::Button::new("📁 Select Image"),
                 )
                 .clicked()
@@ -238,9 +266,25 @@ impl UnifiedDetectionApp {
 
     /// 설정 패널 렌더링
     fn render_settings_panel(&mut self, ui: &mut egui::Ui) {
-        ui.add_space(10.0);
+        ui.add_space(SPACING_MEDIUM);
         ui.collapsing("⚙️ Settings", |ui| {
-            ui.add_space(5.0);
+            ui.add_space(SPACING_SMALL);
+
+            // 모델별 추천 설정 표시
+            ui.horizontal(|ui| {
+                ui.label("Model:");
+                ui.colored_label(
+                    egui::Color32::from_rgb(100, 150, 255),
+                    format!("{} ({}x{}, {} classes)", 
+                        self.selected_model.display_name(),
+                        self.selected_model.input_size(),
+                        self.selected_model.input_size(),
+                        self.selected_model.class_count()
+                    ),
+                );
+            });
+
+            ui.add_space(SPACING_SMALL);
 
             // 신뢰도 임계값 설정
             ui.label("Confidence Threshold:");
@@ -248,7 +292,8 @@ impl UnifiedDetectionApp {
                 // 슬라이더
                 let mut confidence = self.confidence_threshold;
                 if ui
-                    .add(
+                    .add_sized(
+                        egui::vec2(SLIDER_WIDTH, BUTTON_HEIGHT),
                         egui::Slider::new(&mut confidence, 0.1..=1.0)
                             .text("Confidence")
                             .fixed_decimals(2),
@@ -263,7 +308,7 @@ impl UnifiedDetectionApp {
                 let mut confidence_text = format!("{:.2}", self.confidence_threshold);
                 if ui
                     .add_sized(
-                        egui::vec2(60.0, 20.0),
+                        egui::vec2(TEXT_INPUT_WIDTH, TEXT_INPUT_HEIGHT),
                         egui::TextEdit::singleline(&mut confidence_text),
                     )
                     .changed()
@@ -273,54 +318,99 @@ impl UnifiedDetectionApp {
                     self.confidence_threshold = value;
                     self.update_selection_by_confidence();
                 }
-            });
 
-            ui.add_space(5.0);
-
-            // NMS 임계값 설정
-            ui.label("NMS Threshold:");
-            ui.horizontal(|ui| {
-                // 슬라이더
-                let mut nms = self.nms_threshold;
-                if ui
-                    .add(
-                        egui::Slider::new(&mut nms, 0.05..=0.8)
-                            .text("NMS")
-                            .fixed_decimals(2),
-                    )
-                    .changed()
-                {
-                    self.nms_threshold = nms;
-                    self.reapply_nms_only();
-                }
-
-                // 숫자 입력 박스
-                let mut nms_text = format!("{:.2}", self.nms_threshold);
-                if ui
-                    .add_sized(
-                        egui::vec2(60.0, 20.0),
-                        egui::TextEdit::singleline(&mut nms_text),
-                    )
-                    .changed()
-                    && let Ok(value) = nms_text.parse::<f32>()
-                    && (0.05..=0.8).contains(&value)
-                {
-                    self.nms_threshold = value;
-                    self.reapply_nms_only();
+                // 모델별 권장값 버튼
+                if ui.add_sized(
+                    egui::vec2(BUTTON_WIDTH_SMALL, BUTTON_HEIGHT),
+                    egui::Button::new("Default")
+                ).on_hover_text(
+                    format!("Set to model's recommended value: {:.2}", 
+                        self.selected_model.default_confidence_threshold())
+                ).clicked() {
+                    self.confidence_threshold = self.selected_model.default_confidence_threshold();
+                    self.update_selection_by_confidence();
                 }
             });
 
-            ui.add_space(5.0);
+            ui.add_space(SPACING_SMALL);
+
+            // NMS 임계값 설정 (모델이 지원하는 경우만)
+            if self.selected_model.supports_nms() {
+                ui.label("NMS Threshold:");
+                ui.horizontal(|ui| {
+                    // 슬라이더
+                    let mut nms = self.nms_threshold;
+                    let slider_enabled = self.selected_model.supports_realtime_nms_adjustment();
+                    
+                    if !slider_enabled {
+                        ui.add_enabled(false, egui::Label::new("(Real-time adjustment not supported for this model)"));
+                    }
+                    
+                    if ui
+                        .add_enabled(
+                            slider_enabled,
+                            egui::Slider::new(&mut nms, 0.05..=0.8)
+                                .text("NMS")
+                                .fixed_decimals(2),
+                        )
+                        .changed()
+                    {
+                        self.nms_threshold = nms;
+                        if slider_enabled {
+                            self.reapply_nms_only();
+                        }
+                    }
+
+                    // 숫자 입력 박스
+                    let mut nms_text = format!("{:.2}", self.nms_threshold);
+                    if ui
+                        .add_enabled(
+                            slider_enabled,
+                            egui::TextEdit::singleline(&mut nms_text).desired_width(TEXT_INPUT_WIDTH),
+                        )
+                        .changed()
+                        && let Ok(value) = nms_text.parse::<f32>()
+                        && (0.05..=0.8).contains(&value)
+                    {
+                        self.nms_threshold = value;
+                        if slider_enabled {
+                            self.reapply_nms_only();
+                        }
+                    }
+
+                    // 모델별 권장값 버튼
+                    if ui.add_sized(
+                        egui::vec2(BUTTON_WIDTH_SMALL, BUTTON_HEIGHT),
+                        egui::Button::new("Default")
+                    ).on_hover_text(
+                        format!("Set to model's recommended value: {:.2}", 
+                            self.selected_model.default_nms_threshold())
+                    ).clicked() {
+                        self.nms_threshold = self.selected_model.default_nms_threshold();
+                        if slider_enabled {
+                            self.reapply_nms_only();
+                        }
+                    }
+                });
+
+                if !self.selected_model.supports_realtime_nms_adjustment() {
+                    ui.small("ℹ️ NMS threshold changes require re-inference for this model");
+                }
+
+                ui.add_space(SPACING_SMALL);
+            }
 
             // 현재 설정값 표시
             ui.horizontal(|ui| {
                 ui.label("Current Settings:");
+                let nms_text = if self.selected_model.supports_nms() {
+                    format!(", NMS: {:.2}", self.nms_threshold)
+                } else {
+                    String::new()
+                };
                 ui.colored_label(
                     egui::Color32::from_rgb(100, 200, 100),
-                    format!(
-                        "Conf: {:.2}, NMS: {:.2}",
-                        self.confidence_threshold, self.nms_threshold
-                    ),
+                    format!("Conf: {:.2}{}", self.confidence_threshold, nms_text),
                 );
             });
 
@@ -334,7 +424,8 @@ impl UnifiedDetectionApp {
                 let log_zoom = self.image_zoom.ln();
                 let mut log_zoom_value = log_zoom;
                 if ui
-                    .add(
+                    .add_sized(
+                        egui::vec2(SLIDER_WIDTH, BUTTON_HEIGHT),
                         egui::Slider::new(
                             &mut log_zoom_value,
                             CONFIG.ui.min_zoom_log..=CONFIG.ui.max_zoom_log,
@@ -352,7 +443,7 @@ impl UnifiedDetectionApp {
                 let mut zoom_text = format!("{:.3}x", self.image_zoom);
                 if ui
                     .add_sized(
-                        egui::vec2(80.0, 20.0),
+                        egui::vec2(TEXT_INPUT_WIDTH + 10.0, TEXT_INPUT_HEIGHT),
                         egui::TextEdit::singleline(&mut zoom_text),
                     )
                     .changed()
@@ -368,16 +459,28 @@ impl UnifiedDetectionApp {
 
             ui.horizontal(|ui| {
                 // 줌 컨트롤 버튼들
-                if ui.button("100%").clicked() {
+                if ui.add_sized(
+                    egui::vec2(BUTTON_WIDTH_SMALL, BUTTON_HEIGHT),
+                    egui::Button::new("100%")
+                ).clicked() {
                     self.image_zoom = 1.0;
                 }
-                if ui.button("50%").clicked() {
+                if ui.add_sized(
+                    egui::vec2(BUTTON_WIDTH_SMALL, BUTTON_HEIGHT),
+                    egui::Button::new("50%")
+                ).clicked() {
                     self.image_zoom = 0.5;
                 }
-                if ui.button("200%").clicked() {
+                if ui.add_sized(
+                    egui::vec2(BUTTON_WIDTH_SMALL, BUTTON_HEIGHT),
+                    egui::Button::new("200%")
+                ).clicked() {
                     self.image_zoom = 2.0;
                 }
-                if ui.button("Fit").clicked() {
+                if ui.add_sized(
+                    egui::vec2(BUTTON_WIDTH_SMALL, BUTTON_HEIGHT),
+                    egui::Button::new("Fit")
+                ).clicked() {
                     // 이미지가 화면에 맞도록 자동 조정
                     self.image_zoom = 1.0;
                 }
@@ -396,56 +499,101 @@ impl UnifiedDetectionApp {
                 );
             });
 
-            // 색상 매핑 방식 설정
+            // 색상 매핑 방식 설정 (모델이 지원하는 경우만)
+            if self.selected_model.supports_color_mapping() {
+                ui.add_space(SPACING_SMALL);
+                ui.separator();
+                ui.label("Bounding Box Color Mapping:");
+                ui.horizontal(|ui| {
+                    ui.add_sized(
+                        egui::vec2(90.0, BUTTON_HEIGHT),
+                        egui::Label::new("Color Mode:")
+                    );
+                    egui::ComboBox::from_id_salt("color_mapping_mode")
+                        .width(COMBO_BOX_WIDTH)
+                        .selected_text(match self.color_mapping_mode {
+                            vision_model_tester_lib::config::ColorMappingMode::Fixed => "Fixed (Red)",
+                            vision_model_tester_lib::config::ColorMappingMode::RangeBased => {
+                                "Range-Based (5 levels)"
+                            }
+                            vision_model_tester_lib::config::ColorMappingMode::Gradient => {
+                                "Gradient (Linear)"
+                            }
+                            vision_model_tester_lib::config::ColorMappingMode::HsvBased => {
+                                "HSV-Based (Smooth)"
+                            }
+                        })
+                        .show_ui(ui, |ui| {
+                            ui.selectable_value(
+                                &mut self.color_mapping_mode,
+                                vision_model_tester_lib::config::ColorMappingMode::Fixed,
+                                "Fixed (Red)",
+                            );
+                            ui.selectable_value(
+                                &mut self.color_mapping_mode,
+                                vision_model_tester_lib::config::ColorMappingMode::RangeBased,
+                                "Range-Based (5 levels)",
+                            );
+                            ui.selectable_value(
+                                &mut self.color_mapping_mode,
+                                vision_model_tester_lib::config::ColorMappingMode::Gradient,
+                                "Gradient (Linear)",
+                            );
+                            ui.selectable_value(
+                                &mut self.color_mapping_mode,
+                                vision_model_tester_lib::config::ColorMappingMode::HsvBased,
+                                "HSV-Based (Smooth)",
+                            );
+                        });
+                });
+
+                // 색상 매핑 설명
+                ui.collapsing("🎨 Color Mapping Info", |ui| {
+                    ui.label("Color mapping based on confidence level:");
+                    ui.label("• Fixed: All boxes are red");
+                    ui.label("• Range-Based: 5 distinct colors (Blue→Green→Yellow→Orange→Red)");
+                    ui.label("• Gradient: Smooth linear transition");
+                    ui.label("• HSV-Based: Natural color transition using HSV space");
+                });
+            }
+
+            // 모델별 고급 설정
             ui.add_space(5.0);
             ui.separator();
-            ui.label("Bounding Box Color Mapping:");
-            ui.horizontal(|ui| {
-                ui.label("Color Mode:");
-                egui::ComboBox::from_id_salt("color_mapping_mode")
-                    .selected_text(match self.color_mapping_mode {
-                        vision_model_tester_lib::config::ColorMappingMode::Fixed => "Fixed (Red)",
-                        vision_model_tester_lib::config::ColorMappingMode::RangeBased => {
-                            "Range-Based (5 levels)"
+            ui.collapsing("🔧 Model-Specific Settings", |ui| {
+                match &self.selected_model {
+                    vision_model_tester_lib::models::ModelType::YoloV9(_) => {
+                        ui.label("YOLOv9 Features:");
+                        ui.label("✅ Real-time NMS threshold adjustment");
+                        ui.label("✅ Pre-NMS data caching for fast reprocessing");
+                        ui.label("✅ Multiple model variants available");
+                        ui.label("🎯 Optimized for general object detection");
+                    }
+                    vision_model_tester_lib::models::ModelType::RfDetr => {
+                        ui.label("RF-DETR Features:");
+                        ui.label("🔄 Transformer-based architecture");
+                        ui.label("🎯 High precision detection");
+                        ui.label("⚡ End-to-end trainable");
+                        ui.label("ℹ️ NMS changes require re-inference");
+                        
+                        if !self.selected_model.supports_realtime_nms_adjustment() {
+                            ui.colored_label(
+                                egui::Color32::YELLOW,
+                                "⚠️ Some settings require full re-inference"
+                            );
                         }
-                        vision_model_tester_lib::config::ColorMappingMode::Gradient => {
-                            "Gradient (Linear)"
-                        }
-                        vision_model_tester_lib::config::ColorMappingMode::HsvBased => {
-                            "HSV-Based (Smooth)"
-                        }
-                    })
-                    .show_ui(ui, |ui| {
-                        ui.selectable_value(
-                            &mut self.color_mapping_mode,
-                            vision_model_tester_lib::config::ColorMappingMode::Fixed,
-                            "Fixed (Red)",
-                        );
-                        ui.selectable_value(
-                            &mut self.color_mapping_mode,
-                            vision_model_tester_lib::config::ColorMappingMode::RangeBased,
-                            "Range-Based (5 levels)",
-                        );
-                        ui.selectable_value(
-                            &mut self.color_mapping_mode,
-                            vision_model_tester_lib::config::ColorMappingMode::Gradient,
-                            "Gradient (Linear)",
-                        );
-                        ui.selectable_value(
-                            &mut self.color_mapping_mode,
-                            vision_model_tester_lib::config::ColorMappingMode::HsvBased,
-                            "HSV-Based (Smooth)",
-                        );
-                    });
-            });
-
-            // 색상 매핑 설명
-            ui.collapsing("🎨 Color Mapping Info", |ui| {
-                ui.label("Color mapping based on confidence level:");
-                ui.label("• Fixed: All boxes are red");
-                ui.label("• Range-Based: 5 distinct colors (Blue→Green→Yellow→Orange→Red)");
-                ui.label("• Gradient: Smooth linear transition");
-                ui.label("• HSV-Based: Natural color transition using HSV space");
+                    }
+                }
+                
+                // 성능 정보
+                ui.add_space(SPACING_SMALL);
+                ui.label(format!("Input Size: {}×{} pixels", 
+                    self.selected_model.input_size(), 
+                    self.selected_model.input_size()
+                ));
+                ui.label(format!("Classes: {} COCO categories", 
+                    self.selected_model.class_count()
+                ));
             });
 
             // 키보드 단축키 도움말
@@ -924,22 +1072,24 @@ impl UnifiedDetectionApp {
         let _image_path_str = path.to_string_lossy().to_string();
 
         if let (Some(engine), Some(_db)) = (&mut self.inference_engine, &self.inference_db) {
-            // 통합 추론 엔진을 사용하여 객체 검출 수행
-            match engine.detect(&image_data) {
-                Ok(result) => {
-                    self.pre_nms_detections = result.detections.clone();
-                    self.detections = result.detections;
+            // 실시간 NMS 조정을 위해 pre-NMS 결과를 먼저 가져오기
+            match engine.detect_pre_nms(&image_data) {
+                Ok(pre_result) => {
+                    self.pre_nms_detections = pre_result.detections.clone();
+                    
+                    // 현재 NMS 임계값으로 NMS 적용
+                    self.detections = apply_nms_only(pre_result.detections, self.nms_threshold);
                     self.selection = vec![true; self.detections.len()];
                     self.update_selection_by_confidence();
 
-                    if result.inference_time_ms > 0.0 {
-                        self.inference_time_ms = Some(result.inference_time_ms);
+                    if pre_result.inference_time_ms > 0.0 {
+                        self.inference_time_ms = Some(pre_result.inference_time_ms);
                     } else {
                         self.inference_time_ms = None;
                     }
 
                     // 결과 이미지를 텍스처로 로딩
-                    self.load_texture(ctx, result.result_image);
+                    self.load_texture(ctx, pre_result.result_image);
                 }
                 Err(e) => {
                     self.error_message = Some(format!("Detection error: {}", e));

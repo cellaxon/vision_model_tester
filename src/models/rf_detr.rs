@@ -1,13 +1,11 @@
 use image::{ImageReader, Rgb, RgbImage};
-use imageproc::drawing::draw_hollow_rect_mut;
-use imageproc::rect::Rect;
 use ndarray::CowArray;
 use ndarray::{ArrayD, IxDyn};
 use ort::execution_providers::{CPUExecutionProviderOptions, CoreMLExecutionProviderOptions};
 use ort::{Environment, ExecutionProvider, SessionBuilder, Value};
 use std::sync::Arc;
 
-use crate::utils::{color_utils, math_utils};
+use crate::utils::math_utils;
 use crate::models::{DetectionResult, Detection};
 
 // 상수 정의
@@ -16,7 +14,7 @@ const CONFIDENCE_THRESHOLD: f32 = 0.5;
 const NMS_THRESHOLD: f32 = 0.2;
 
 // 임베디드 리소스: RF-DETR 모델 파일
-static RF_DETR_ORIGINAL_ONNX: &[u8] = include_bytes!("../../assets/models/rf-detr.onnx");
+static RF_DETR_ORIGINAL_ONNX: &[u8] = include_bytes!("../../assets/models/rf-detr/rf-detr.onnx");
 
 /// RF-DETR COCO 클래스 ID를 클래스 이름으로 변환
 fn rf_detr_id_to_label(class_id: u32) -> Option<&'static str> {
@@ -296,21 +294,7 @@ pub fn parse_rf_detr_outputs(
     Ok(detections)
 }
 
-/// 검출된 객체에 바운딩 박스 그리기
-pub fn draw_detections(image: &mut RgbImage, detections: &[Detection]) {
-    for detection in detections {
-        let [x1, y1, x2, y2] = detection.bbox;
-        let x1 = (x1 * image.width() as f32) as i32;
-        let y1 = (y1 * image.height() as f32) as i32;
-        let x2 = (x2 * image.width() as f32) as i32;
-        let y2 = (y2 * image.height() as f32) as i32;
 
-        let rect = Rect::at(x1, y1).of_size((x2 - x1).max(1) as u32, (y2 - y1).max(1) as u32);
-        // 신뢰도에 따라 색상을 다르게 표시 (시각적 구분 향상)
-        let color = color_utils::get_confidence_color_hsv(detection.confidence);
-        draw_hollow_rect_mut(image, rect, color);
-    }
-}
 
 /// 모델 세션을 캐시하는 구조체
 pub struct ModelCache {
@@ -421,9 +405,8 @@ pub fn detect_objects_with_cache(
         apply_nms(&mut detections, NMS_THRESHOLD);
     }
 
-    // 바운딩 박스가 포함된 이미지 생성
-    let mut result_image = img.clone();
-    draw_detections(&mut result_image, &detections);
+    // 원본 이미지 사용 (바운딩 박스 그리기 제거)
+    let result_image = img.clone();
 
     let result = DetectionResult {
         detections,
