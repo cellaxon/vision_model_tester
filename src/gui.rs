@@ -1,13 +1,13 @@
 use eframe::egui;
 use std::fs;
 use std::path::PathBuf;
-use yolov9_onnx_test_lib::{
-    Detection, InferenceDb, ModelCache, apply_nms_only, get_embedded_model_list, get_model_info,
-    load_or_infer_pre_nms,
+use vision_model_tester_lib::{
+    Detection, InferenceDb, apply_nms_only,
+    models::{ModelType, UnifiedInferenceEngine},
 };
 
 // 설정에서 줌 관련 상수 가져오기
-use yolov9_onnx_test_lib::config::CONFIG;
+use vision_model_tester_lib::config::CONFIG;
 
 /// GUI 애플리케이션 실행
 pub fn run_gui() {
@@ -17,16 +17,16 @@ pub fn run_gui() {
     };
 
     if let Err(e) = eframe::run_native(
-        "YOLOv9 Object Detection",
+        "YOLOv9 & RF-DETR Object Detection",
         options,
-        Box::new(|_cc| Ok(Box::new(YoloV9App::default()))),
+        Box::new(|_cc| Ok(Box::new(UnifiedDetectionApp::default()))),
     ) {
         eprintln!("GUI 실행 오류: {e}");
     }
 }
 
-/// YOLOv9 GUI 애플리케이션 구조체
-struct YoloV9App {
+/// 통합 객체 검출 GUI 애플리케이션 구조체
+struct UnifiedDetectionApp {
     detections: Vec<Detection>,
     pre_nms_detections: Vec<Detection>,
     is_processing: bool,
@@ -35,8 +35,9 @@ struct YoloV9App {
     processed_image: Option<egui::TextureHandle>,
     image_size: egui::Vec2,
     inference_time_ms: Option<f64>,
-    model_cache: Option<ModelCache>,
     inference_db: Option<InferenceDb>,
+    // 통합 추론 엔진
+    inference_engine: Option<UnifiedInferenceEngine>,
     // 설정값들
     confidence_threshold: f32,
     nms_threshold: f32,
@@ -48,14 +49,17 @@ struct YoloV9App {
     sort_by: DetectionSortBy,
     sort_asc: bool,
     // 모델 선택
-    available_models: Vec<String>,
-    selected_model: String,
+    available_models: Vec<ModelType>,
+    selected_model: ModelType,
     // 색상 매핑 방식
-    color_mapping_mode: yolov9_onnx_test_lib::config::ColorMappingMode,
+    color_mapping_mode: vision_model_tester_lib::config::ColorMappingMode,
 }
 
-impl Default for YoloV9App {
+impl Default for UnifiedDetectionApp {
     fn default() -> Self {
+        let available_models = UnifiedInferenceEngine::get_available_models();
+        let selected_model = available_models.first().cloned().unwrap_or(ModelType::YoloV9("gelan-e.onnx".to_string()));
+        
         Self {
             detections: Vec::new(),
             pre_nms_detections: Vec::new(),
@@ -65,8 +69,8 @@ impl Default for YoloV9App {
             processed_image: None,
             image_size: egui::Vec2::ZERO,
             inference_time_ms: None,
-            model_cache: None,
             inference_db: None,
+            inference_engine: None,
             // 기본 설정값들
             confidence_threshold: CONFIG.ui.default_confidence_threshold,
             nms_threshold: CONFIG.ui.default_nms_threshold,
@@ -74,8 +78,8 @@ impl Default for YoloV9App {
             selection: Vec::new(),
             sort_by: DetectionSortBy::Index,
             sort_asc: true,
-            available_models: get_embedded_model_list(),
-            selected_model: "".to_string(),
+            available_models,
+            selected_model,
             color_mapping_mode: CONFIG.ui.bounding_box_color_mode.clone(),
         }
     }
@@ -89,7 +93,7 @@ enum DetectionSortBy {
     Confidence,
 }
 
-impl eframe::App for YoloV9App {
+impl eframe::App for UnifiedDetectionApp {
     fn update(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
         // 키보드 단축키 처리 (줌 컨트롤)
         self.handle_keyboard_shortcuts(ctx);
@@ -113,7 +117,7 @@ impl eframe::App for YoloV9App {
     }
 }
 
-impl YoloV9App {
+impl UnifiedDetectionApp {
     /// 키보드 단축키 처리
     fn handle_keyboard_shortcuts(&mut self, ctx: &egui::Context) {
         ctx.input(|input| {
@@ -151,41 +155,47 @@ impl YoloV9App {
 
     /// 헤더 영역 렌더링
     fn render_header(&mut self, ui: &mut egui::Ui, ctx: &egui::Context) {
-        ui.heading("YOLOv9 Object Detection");
+        ui.heading("YOLOv9 & RF-DETR Object Detection");
         ui.add_space(10.0);
 
         // 모델 정보 표시
+        if self.available_models.is_empty() {
+            self.available_models = UnifiedInferenceEngine::get_available_models();
+        }
+
+        let mut selected = self.selected_model.clone();
+        let available_models = &self.available_models;
+        
         ui.horizontal(|ui| {
             ui.label("Model:");
-            if self.available_models.is_empty() {
-                self.available_models = get_embedded_model_list();
-            }
-            if self.selected_model.is_empty()
-                && let Some(first) = self.available_models.first()
-            {
-                self.selected_model = first.clone();
-            }
-
-            let mut selected = self.selected_model.clone();
             egui::ComboBox::from_id_salt("model_combo")
-                .selected_text(&selected)
+                .selected_text(&selected.display_name())
                 .show_ui(ui, |ui| {
-                    for m in &self.available_models {
-                        ui.selectable_value(&mut selected, m.clone(), m);
+                    for m in available_models {
+                        ui.selectable_value(&mut selected, m.clone(), m.display_name());
                     }
                 });
-            if selected != self.selected_model {
-                self.selected_model = selected;
-                // 모델이 바뀌면 현재 이미지가 있다면 즉시 재추론 실행
-                if let Some(image_path) = &self.selected_image_path {
-                    self.process_image(ctx, image_path.clone());
+        });
+        
+        if selected != self.selected_model {
+            self.selected_model = selected;
+            // 모델이 바뀌면 추론 엔진 재초기화
+            if let Some(engine) = &mut self.inference_engine {
+                if let Err(e) = engine.set_model(self.selected_model.clone()) {
+                    self.error_message = Some(format!("모델 변경 실패: {}", e));
                 }
             }
+            // 현재 이미지가 있다면 즉시 재추론 실행
+            if let Some(image_path) = &self.selected_image_path {
+                self.process_image(ctx, image_path.clone());
+            }
+        }
 
-            let (model_name, input_size) = get_model_info(&self.selected_model);
+        ui.horizontal(|ui| {
+            let model_info = &self.selected_model;
             ui.colored_label(
                 egui::Color32::from_rgb(0, 150, 255),
-                format!("{} ({}x{})", model_name, input_size, input_size),
+                format!("{} ({}x{})", model_info.display_name(), model_info.input_size(), model_info.input_size()),
             );
         });
 
@@ -394,36 +404,36 @@ impl YoloV9App {
                 ui.label("Color Mode:");
                 egui::ComboBox::from_id_salt("color_mapping_mode")
                     .selected_text(match self.color_mapping_mode {
-                        yolov9_onnx_test_lib::config::ColorMappingMode::Fixed => "Fixed (Red)",
-                        yolov9_onnx_test_lib::config::ColorMappingMode::RangeBased => {
+                        vision_model_tester_lib::config::ColorMappingMode::Fixed => "Fixed (Red)",
+                        vision_model_tester_lib::config::ColorMappingMode::RangeBased => {
                             "Range-Based (5 levels)"
                         }
-                        yolov9_onnx_test_lib::config::ColorMappingMode::Gradient => {
+                        vision_model_tester_lib::config::ColorMappingMode::Gradient => {
                             "Gradient (Linear)"
                         }
-                        yolov9_onnx_test_lib::config::ColorMappingMode::HsvBased => {
+                        vision_model_tester_lib::config::ColorMappingMode::HsvBased => {
                             "HSV-Based (Smooth)"
                         }
                     })
                     .show_ui(ui, |ui| {
                         ui.selectable_value(
                             &mut self.color_mapping_mode,
-                            yolov9_onnx_test_lib::config::ColorMappingMode::Fixed,
+                            vision_model_tester_lib::config::ColorMappingMode::Fixed,
                             "Fixed (Red)",
                         );
                         ui.selectable_value(
                             &mut self.color_mapping_mode,
-                            yolov9_onnx_test_lib::config::ColorMappingMode::RangeBased,
+                            vision_model_tester_lib::config::ColorMappingMode::RangeBased,
                             "Range-Based (5 levels)",
                         );
                         ui.selectable_value(
                             &mut self.color_mapping_mode,
-                            yolov9_onnx_test_lib::config::ColorMappingMode::Gradient,
+                            vision_model_tester_lib::config::ColorMappingMode::Gradient,
                             "Gradient (Linear)",
                         );
                         ui.selectable_value(
                             &mut self.color_mapping_mode,
-                            yolov9_onnx_test_lib::config::ColorMappingMode::HsvBased,
+                            vision_model_tester_lib::config::ColorMappingMode::HsvBased,
                             "HSV-Based (Smooth)",
                         );
                     });
@@ -784,19 +794,19 @@ impl YoloV9App {
 
                         // 신뢰도에 따른 색상 결정
                         let box_color = match self.color_mapping_mode {
-                            yolov9_onnx_test_lib::config::ColorMappingMode::Fixed => {
+                            vision_model_tester_lib::config::ColorMappingMode::Fixed => {
                                 egui::Color32::from_rgb(255, 0, 0)
                             }
-                            yolov9_onnx_test_lib::config::ColorMappingMode::RangeBased => {
-                                let color = yolov9_onnx_test_lib::utils::color_utils::get_confidence_color(det.confidence);
+                            vision_model_tester_lib::config::ColorMappingMode::RangeBased => {
+                                let color = vision_model_tester_lib::utils::color_utils::get_confidence_color(det.confidence);
                                 egui::Color32::from_rgb(color[0], color[1], color[2])
                             }
-                            yolov9_onnx_test_lib::config::ColorMappingMode::Gradient => {
-                                let color = yolov9_onnx_test_lib::utils::color_utils::get_confidence_color_gradient(det.confidence);
+                            vision_model_tester_lib::config::ColorMappingMode::Gradient => {
+                                let color = vision_model_tester_lib::utils::color_utils::get_confidence_color_gradient(det.confidence);
                                 egui::Color32::from_rgb(color[0], color[1], color[2])
                             }
-                            yolov9_onnx_test_lib::config::ColorMappingMode::HsvBased => {
-                                let color = yolov9_onnx_test_lib::utils::color_utils::get_confidence_color_hsv(det.confidence);
+                            vision_model_tester_lib::config::ColorMappingMode::HsvBased => {
+                                let color = vision_model_tester_lib::utils::color_utils::get_confidence_color_hsv(det.confidence);
                                 egui::Color32::from_rgb(color[0], color[1], color[2])
                             }
                         };
@@ -875,14 +885,20 @@ impl YoloV9App {
         };
 
         // 모델 캐시 초기화 (필요한 경우)
-        if self.model_cache.is_none() {
-            match ModelCache::new() {
-                Ok(cache) => {
-                    self.model_cache = Some(cache);
-                    println!("Model cache initialized");
+        if self.inference_engine.is_none() {
+            match UnifiedInferenceEngine::new() {
+                Ok(mut engine) => {
+                    // 선택된 모델로 설정
+                    if let Err(e) = engine.set_model(self.selected_model.clone()) {
+                        self.error_message = Some(format!("Failed to set model: {}", e));
+                        self.is_processing = false;
+                        return;
+                    }
+                    self.inference_engine = Some(engine);
+                    println!("Inference engine initialized for model: {}", self.selected_model.display_name());
                 }
                 Err(e) => {
-                    self.error_message = Some(format!("Failed to initialize model cache: {}", e));
+                    self.error_message = Some(format!("Failed to initialize inference engine: {}", e));
                     self.is_processing = false;
                     return;
                 }
@@ -905,33 +921,25 @@ impl YoloV9App {
         }
 
         // 이미지 경로를 문자열로 변환
-        let image_path_str = path.to_string_lossy().to_string();
+        let _image_path_str = path.to_string_lossy().to_string();
 
-        if let (Some(cache), Some(db)) = (&mut self.model_cache, &self.inference_db) {
-            match load_or_infer_pre_nms(
-                &image_path_str,
-                &image_data,
-                &self.selected_model,
-                cache,
-                db,
-            ) {
-                Ok((pre_nms_detections, inference_time_ms)) => {
-                    self.pre_nms_detections = pre_nms_detections;
-                    self.detections =
-                        apply_nms_only(self.pre_nms_detections.clone(), self.nms_threshold);
+        if let (Some(engine), Some(_db)) = (&mut self.inference_engine, &self.inference_db) {
+            // 통합 추론 엔진을 사용하여 객체 검출 수행
+            match engine.detect(&image_data) {
+                Ok(result) => {
+                    self.pre_nms_detections = result.detections.clone();
+                    self.detections = result.detections;
                     self.selection = vec![true; self.detections.len()];
                     self.update_selection_by_confidence();
 
-                    if inference_time_ms > 0.0 {
-                        self.inference_time_ms = Some(inference_time_ms);
+                    if result.inference_time_ms > 0.0 {
+                        self.inference_time_ms = Some(result.inference_time_ms);
                     } else {
-                        self.inference_time_ms = None; // 캐시 사용 시 시간 표시 안함
+                        self.inference_time_ms = None;
                     }
 
-                    // 텍스처 로딩
-                    if let Ok(img) = image::load_from_memory(&image_data) {
-                        self.load_texture(ctx, img.to_rgb8());
-                    }
+                    // 결과 이미지를 텍스처로 로딩
+                    self.load_texture(ctx, result.result_image);
                 }
                 Err(e) => {
                     self.error_message = Some(format!("Detection error: {}", e));
@@ -947,7 +955,11 @@ impl YoloV9App {
         // DB에서 해당 항목 삭제 후 일반 처리
         if let Some(db) = &self.inference_db {
             let image_path_str = path.to_string_lossy().to_string();
-            if let Err(e) = db.delete_cache_entry(&image_path_str, &self.selected_model) {
+            let model_name = match &self.selected_model {
+                ModelType::YoloV9(file_name) => file_name.clone(),
+                ModelType::RfDetr => "rf_detr".to_string(),
+            };
+            if let Err(e) = db.delete_cache_entry(&image_path_str, &model_name) {
                 eprintln!("Failed to delete from DB: {}", e);
                 // DB 삭제 실패해도 계속 진행 (강제 재추론이므로)
             }

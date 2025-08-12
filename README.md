@@ -1,15 +1,19 @@
-# YOLOv9 ONNX Object Detection Application
+# YOLOv9 & RF-DETR Unified Object Detection Application
 
-YOLOv9 모델을 사용한 객체 검출 애플리케이션입니다. ONNX Runtime을 통해 추론을 수행하며, egui 기반의 GUI 인터페이스를 제공합니다.
+YOLOv9와 RF-DETR 모델을 통합한 객체 검출 애플리케이션입니다. ONNX Runtime을 통해 추론을 수행하며, egui 기반의 GUI 인터페이스를 제공합니다.
 
 ## 🚀 주요 기능
 
 ### 🔍 객체 검출
-- YOLOv9 모델을 사용한 실시간 객체 검출
-- COCO 데이터셋의 80개 클래스 지원
+- **통합 모델 지원**: YOLOv9 (4가지 변형) + RF-DETR
+  - YOLOv9: GELAN-C, GELAN-E, YOLOv9-C, YOLOv9-E
+  - RF-DETR: Transformer 기반 정밀 검출 모델
+- COCO 데이터셋 클래스 지원 (YOLOv9: 80개, RF-DETR: 90개)
+- 모델별 최적화된 입력 크기 (YOLOv9: 640x640, RF-DETR: 560x560)
 - 신뢰도 임계값 및 NMS 임계값 조정 가능
 - Pre-NMS 데이터 캐싱으로 빠른 재처리
 - **신뢰도 기반 바운딩 박스 색상 매핑**
+- **실시간 모델 전환 및 재추론**
 
 ### 🖥️ GUI 인터페이스
 - egui 기반의 현대적인 사용자 인터페이스
@@ -34,6 +38,13 @@ YOLOv9 모델을 사용한 객체 검출 애플리케이션입니다. ONNX Runti
 - 모듈화된 설정 구조
 - **컴파일 타임 상수 관리**
 
+### 🏗️ 통합 아키텍처
+- **UnifiedInferenceEngine**: 멀티 모델 추론 엔진
+- **ObjectDetector Trait**: 공통 인터페이스
+- **Thread-safe 전역 엔진**: OnceLock과 Mutex 사용
+- **모듈화된 구조**: models/yolov9, models/rf_detr
+- **공통 타입 시스템**: Detection, DetectionResult, ModelType
+
 ### 🎨 바운딩 박스 색상 시스템
 - **고정 색상 모드**: 모든 박스를 빨간색으로 표시
 - **범위별 색상 모드**: 5단계 색상 (파랑→초록→노랑→주황→빨강)
@@ -45,9 +56,13 @@ YOLOv9 모델을 사용한 객체 검출 애플리케이션입니다. ONNX Runti
 ```
 yolov9_onnx_test/
 ├── src/
-│   ├── lib.rs          # 메인 라이브러리 (ONNX 추론, 이미지 처리, 캐싱)
+│   ├── lib.rs          # 메인 라이브러리 및 통합 API
 │   ├── main.rs         # 애플리케이션 진입점
-│   ├── gui.rs          # egui 기반 GUI 구현
+│   ├── gui.rs          # egui 기반 통합 GUI
+│   ├── models/         # 모델별 구현
+│   │   ├── mod.rs      # 통합 인터페이스 및 공통 타입
+│   │   ├── yolov9.rs   # YOLOv9 모델 구현
+│   │   └── rf_detr.rs  # RF-DETR 모델 구현
 │   ├── models.rs       # 임베디드 모델 관리
 │   ├── config.rs       # 설정 관리 및 구조체
 │   ├── error.rs        # 커스텀 에러 처리 (thiserror 사용)
@@ -81,35 +96,40 @@ yolov9_onnx_test/
 mkdir -p assets/models
 
 # 2) 모델 다운로드 (예시)
-# 권장: 경량 GELAN-c, 기본 YOLOv9-c, 고정밀 YOLOv9-e, GELAN-e
+# YOLOv9 모델들
 curl -L -o assets/models/gelan-c.onnx https://huggingface.co/Xenova/yolov9-onnx/resolve/main/gelan-c.onnx
 curl -L -o assets/models/yolov9-c.onnx https://huggingface.co/Xenova/yolov9-onnx/resolve/main/yolov9-c.onnx
 # 선택적으로 추가 다운로드
 curl -L -o assets/models/gelan-e.onnx https://huggingface.co/Xenova/yolov9-onnx/resolve/main/gelan-e.onnx
 curl -L -o assets/models/yolov9-e.onnx https://huggingface.co/Xenova/yolov9-onnx/resolve/main/yolov9-e.onnx
+# RF-DETR 모델 (이미 복사됨)
+# curl -L -o assets/models/rf_detr_model.onnx https://huggingface.co/han-cai/rf-detr/resolve/main/rf_detr.onnx
 ```
 
 > 빌드 시 해당 파일들이 존재해야 임베딩됩니다. 모델 파일명을 변경하지 말고 그대로 두는 것을 권장합니다.
 
-## 🧠 모델 상세 안내
+## 🧠 통합 모델 상세 안내
+
+### 🎯 모델 성능 비교
+
+| 모델 | 파일명 | 크기 | 입력 크기 | 클래스 수 | 속도 | 정확도 | 메모리 | 추론시간 (M4) | 권장 사용 사례 |
+|------|---------|------|-----------|-----------|------|--------|-------|---------------|----------------|
+| **YOLOv9-GELAN-C** | `gelan-c.onnx` | 97MB | 640×640 | 80 | 매우 빠름 | 높음 | 102MB | 150-200ms | 실시간, 모바일, 임베디드 |
+| **YOLOv9-GELAN-E** | `gelan-e.onnx` | 222MB | 640×640 | 80 | 빠름 | 높음 | 233MB | 300-400ms | 일반 실시간, 웹캠 |
+| **YOLOv9-C** | `yolov9-c.onnx` | 195MB | 640×640 | 80 | 보통 | 매우 높음 | 205MB | 200-300ms | 정확도-속도 균형, 범용 |
+| **YOLOv9-E** | `yolov9-e.onnx` | 265MB | 640×640 | 80 | 느림 | 최고 | 278MB | 400-500ms | 고정밀, 연구, 분석 |
+| **RF-DETR** | `rf_detr_model.onnx` | 103MB | 560×560 | 90 | 보통 | 매우 높음 | 108MB | 350-450ms | Transformer 정밀 검출 |
 
 ### 지원 모델 및 특징
-- 입력 크기: 640×640 고정 (본 프로젝트 기본값)
-- 클래스: COCO 80 classes
-- 출력: YOLOv9 형식 (bbox + class scores), 후처리로 NMS 적용
-
-| 모델명 | 파일명 | 대략 크기 | 설명 | 특징 |
-|---|---|---|---|---|
-| YOLOv9-C | `yolov9-c.onnx` | ~205 MB | YOLOv9 Compact | 속도/정확도 균형, 범용 |
-| YOLOv9-E | `yolov9-e.onnx` | ~278 MB | YOLOv9 Extended | 최고 정확도, 자원 사용 큼 |
-| GELAN-C | `gelan-c.onnx` | ~102 MB | 경량화 모델 | 가장 가벼움, 빠른 추론 |
-| GELAN-E | `gelan-e.onnx` | ~233 MB | 확장 경량 모델 | 정확도 향상, 여전히 경량 |
+- **YOLOv9 계열**: 640×640 입력, COCO 80 클래스, YOLOv9 출력 형식
+- **RF-DETR**: 560×560 입력, COCO 90 클래스 (1-90, background 제외), Transformer 출력
 
 ### 모델 선택 가이드
-- 실시간(속도 우선): **GELAN-C** 또는 **YOLOv9-C**
-- 정확도 우선: **YOLOv9-E** 또는 **GELAN-E**
-- 메모리 제약: **GELAN-C**
-- 균형/기본 권장: **YOLOv9-C**
+- **실시간 처리 (속도 우선)**: GELAN-C > YOLOv9-C > GELAN-E
+- **정확도 우선**: YOLOv9-E > RF-DETR > YOLOv9-C > GELAN-E
+- **메모리 제약 환경**: GELAN-C > RF-DETR > YOLOv9-C
+- **Transformer 기반 고정밀**: RF-DETR (연구, 분석용)
+- **균형/기본 권장**: YOLOv9-C (범용), RF-DETR (정밀)
 
 ### 플랫폼/런타임 참고
 - macOS: CoreML + ANE 가속 경로 사용(가능 시), CPU fallback 자동
